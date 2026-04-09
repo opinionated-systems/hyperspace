@@ -1,0 +1,209 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    Also handles markdown code blocks (```json...```) as fallback.
+    """
+    results = []
+    search_from = 0
+    
+    # First try <json>...</json> tags
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            # Try to extract JSON from within the content if it's wrapped in other text
+            try:
+                # Find first { and last }
+                json_start = inner.find("{")
+                json_end = inner.rfind("}")
+                if json_start != -1 and json_end != -1 and json_end > json_start:
+                    results.append(json.loads(inner[json_start:json_end + 1]))
+            except json.JSONDecodeError:
+                continue
+    
+    # Fallback: try markdown code blocks
+    if not results:
+        search_from = 0
+        while True:
+            start = text.find("```json", search_from)
+            if start == -1:
+                # Also try without 'json' specifier
+                start = text.find("```", search_from)
+                if start == -1:
+                    break
+                end = text.find("```", start + 3)
+            else:
+                end = text.find("```", start + 7)
+            if end == -1:
+                break
+            
+            if text[start:start+7] == "```json":
+                inner = text[start + 7:end].strip()
+            else:
+                inner = text[start + 3:end].strip()
+            search_from = end + 3
+            try:
+                results.append(json.loads(inner))
+            except json.JSONDecodeError:
+                continue
+    
+    return results or None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems with chain-of-thought reasoning."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem with structured reasoning.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract fields for structured prompting
+        domain = inputs.get("domain", "")
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+
+        instruction = f"""You are an expert mathematical grader for International Mathematical Olympiad (IMO) problems.
+
+Your task is to evaluate a student's answer by comparing it against the official solution and grading guidelines.
+
+## Problem Domain
+{domain}
+
+## Problem Statement
+{problem}
+
+## Official Solution
+{solution}
+
+## Grading Guidelines
+{grading_guidelines}
+
+## Student's Answer
+{student_answer}
+
+## Instructions
+1. First, analyze the student's answer step by step. Identify what they got right and what they got wrong.
+2. Compare their reasoning against the official solution.
+3. Check if they followed the grading guidelines.
+4. Provide your reasoning in the "analysis" field.
+5. Provide your final grade/score in the "response" field.
+
+Respond in JSON format with the following schema:
+<json>
+{{
+    "analysis": "Your detailed step-by-step analysis of the student's answer...",
+    "response": "Your final grade/score (e.g., 'Correct', 'Partial', '0', '7', etc.)"
+}}
+</json>"""
+
+        response, msg_history, info = get_response_from_llm(
+            msg=instruction,
+            model=self.model,
+            msg_history=[],
+        )
+
+        # Extract prediction from JSON
+        prediction = self._extract_prediction(msg_history)
+
+        return str(prediction), msg_history
+
+    def _extract_prediction(self, msg_history: list[dict]) -> str:
+        """Extract prediction from message history.
+        
+        Tries multiple extraction strategies and field names for robustness.
+        """
+        if not msg_history:
+            return "None"
+        
+        # Get the last assistant message
+        last_msg = msg_history[-1]
+        text = last_msg.get("text", "")
+        
+        if not text:
+            return "None"
+        
+        # Try to extract JSON blocks
+        extracted = _extract_jsons(text)
+        
+        if not extracted:
+            # Fallback: try to find any JSON-like structure in the text
+            self.log_fn("No JSON blocks found, trying fallback extraction")
+            try:
+                # Look for patterns like "response": "..." or "grade": "..."
+                import re
+                response_match = re.search(r'["\']response["\']\s*:\s*["\']([^"\']+)["\']', text)
+                if response_match:
+                    return response_match.group(1)
+                grade_match = re.search(r'["\']grade["\']\s*:\s*["\']([^"\']+)["\']', text)
+                if grade_match:
+                    return grade_match.group(1)
+                score_match = re.search(r'["\']score["\']\s*:\s*["\']?([^"\'\s,}]+)', text)
+                if score_match:
+                    return score_match.group(1)
+            except Exception as e:
+                self.log_fn(f"Fallback extraction failed: {e}")
+            return "None"
+        
+        # Try to get response from extracted JSON
+        last_extract = extracted[-1]
+        
+        # Priority order for field names
+        field_priority = ["response", "grade", "score", "result", "evaluation", "verdict"]
+        
+        for field in field_priority:
+            if field in last_extract:
+                value = last_extract[field]
+                # Log the analysis if available for debugging
+                if "analysis" in last_extract:
+                    self.log_fn(f"Analysis: {str(last_extract['analysis'])[:200]}...")
+                return str(value)
+        
+        # If no known field found, return the first string value
+        for key, value in last_extract.items():
+            if isinstance(value, str) and value:
+                return value
+        
+        return "None"

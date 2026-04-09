@@ -1,0 +1,7 @@
+{
+  "model": "openrouter/qwen/qwen3.6-plus:free",
+  "agent_name": "qwen3.6-plus",
+  "seed": 43,
+  "iterations": 20,
+  "python_version": "3.11.15"
+}

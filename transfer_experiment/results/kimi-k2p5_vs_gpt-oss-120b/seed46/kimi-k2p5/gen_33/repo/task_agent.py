@@ -1,0 +1,1174 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+# Valid grading labels
+VALID_LABELS = ["correct", "incorrect", "partial", "almost"]
+
+# Label priority for conflict resolution (higher = more preferred when uncertain)
+# For IMO grading, we want to be conservative - prefer incorrect over false positives
+# But we also want to catch partial credit cases - so partial gets high priority
+LABEL_PRIORITY = {"incorrect": 4, "almost": 3, "partial": 2, "correct": 1}
+
+# Additional aliases for better matching
+LABEL_ALIASES_EXTENDED = {
+    "correct": ["full credit", "complete solution", "fully solved", "all correct", "perfect solution"],
+    "incorrect": ["no credit", "zero marks", "completely wrong", "fundamentally flawed", "unsalvageable"],
+    "partial": ["some credit", "half marks", "partially correct", "partial solution", "incomplete but valid"],
+    "almost": ["near complete", "essentially correct", "minor fix needed", "small omission", "nearly solved"],
+}
+
+# Confidence thresholds for different labels
+CONFIDENCE_THRESHOLDS = {
+    "correct": 0.85,   # High bar for correct - must be very confident
+    "incorrect": 0.6,  # Lower bar for incorrect - catch pattern matching cases
+    "partial": 0.5,    # Lower bar for partial - catch valid attempts
+    "almost": 0.75,    # High bar for almost - nearly complete
+}
+
+# Pattern matching indicators - these strongly suggest "incorrect"
+PATTERN_MATCHING_INDICATORS = [
+    "n=1", "n=2", "n=3", "n=4", "n=5",
+    "for n=", "when n=", "if n=",
+    "1, 2, 3", "1,2,3", "1+2+3", "1×2×3",
+    "pattern holds", "pattern continues", "the pattern",
+    "checking examples", "tested values", "verified for",
+    "small values", "first few", "several cases",
+]
+
+# Valid proof technique indicators - these suggest "partial" or better
+VALID_TECHNIQUE_INDICATORS = [
+    "proof by contradiction", "contradiction",
+    "induction", "base case", "inductive step", "inductive hypothesis",
+    "pigeonhole principle", "pigeonhole",
+    "by contradiction", "suppose not", "assume for contradiction",
+    "without loss of generality", "wlog",
+    "consider the cases", "case 1", "case 2", "case analysis",
+    "let x be", "suppose that", "assume that",
+    "theorem", "lemma", "corollary",
+    "therefore", "thus", "hence", "it follows that",
+]
+
+# Mapping from labels to their canonical form
+LABEL_CANONICAL = {
+    "correct": "correct",
+    "incorrect": "incorrect", 
+    "partial": "partial",
+    "almost": "partial",
+}
+
+# Common misspellings and variations mapping
+LABEL_ALIASES = {
+    "correct": ["correct", "right", "true", "valid", "accurate", "complete", "fully correct", "entirely correct", "perfect", "solved", "full marks"],
+    "incorrect": ["incorrect", "wrong", "false", "error", "invalid", "inaccurate", "flawed", "mistaken", "fundamentally wrong", "no credit", "zero"],
+    "partial": ["partial", "incomplete", "partially", "some", "part", "partial credit", "half"],
+    "almost": ["almost", "nearly", "mostly correct", "almost correct", "nearly complete", "almost there", "minor gap", "tiny gap", "small gap", "nearly right"],
+}
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks or raw JSON.
+    
+    Uses multiple strategies with priority ordering to handle various output formats.
+    Returns list of dicts with "response" field, or None if no valid JSON found.
+    """
+    if not text or not isinstance(text, str):
+        return None
+        
+    results = []
+    text_lower = text.lower()
+    
+    # Strategy 0: Look for JSON block at the very end of the text (most reliable for our prompt)
+    # This handles cases where the JSON is the last line but may have extra whitespace
+    lines = text.split('\n')
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        if not line:
+            continue
+        # Check if this line contains a complete JSON block
+        if '<json>' in line and '</json>' in line:
+            start = line.lower().find('<json>')
+            end = line.lower().find('</json>') + 7
+            if start != -1 and end > start:
+                inner = line[start + 6:end - 7].strip()
+                parsed = _try_parse_json_with_fallbacks(inner)
+                if parsed and "response" in parsed:
+                    results.append(parsed)
+                    break
+    
+    # Strategy 1: Try to find <json>...</json> blocks (case insensitive) - HIGHEST PRIORITY
+    # Search from the END to get the most recent/final JSON block first
+    search_positions = []
+    search_from = 0
+    while True:
+        start = text_lower.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text_lower.find("</json>", start)
+        if end == -1:
+            break
+        search_positions.append((start, end))
+        search_from = end + 7
+    
+    # Process from last to first (most recent JSON is likely the final verdict)
+    for start, end in reversed(search_positions):
+        inner = text[start + 6:end].strip()
+        parsed = _try_parse_json_with_fallbacks(inner)
+        if parsed and "response" in parsed:
+            results.append(parsed)
+    
+    # Strategy 2: Try to find JSON in markdown code blocks
+    code_block_patterns = [
+        r'```(?:json)?\s*\n?(.*?)\n?```',
+    ]
+    for pattern in code_block_patterns:
+        for match in re.finditer(pattern, text, re.DOTALL):
+            json_str = match.group(1).strip()
+            if json_str:
+                parsed = _try_parse_json_with_fallbacks(json_str)
+                if parsed and "response" in parsed:
+                    results.append(parsed)
+    
+    # Strategy 3: Try to find raw JSON objects with "response" field
+    json_patterns = [
+        r'\{\s*"response"\s*:\s*"([^"]+)"\s*\}',
+        r"\{\s*'response'\s*:\s*'([^']+)'\s*\}",
+        r'\{\s*["\']?response["\']?\s*:\s*["\']?([^"\'\}\n,]+)["\']?\s*\}',
+    ]
+    for pattern in json_patterns:
+        for match in re.finditer(pattern, text, re.DOTALL | re.IGNORECASE):
+            parsed = _try_parse_json_with_fallbacks(match.group(0))
+            if parsed and "response" in parsed:
+                results.append(parsed)
+    
+    # Strategy 4: Look for explicit verdict statements with strong indicators
+    verdict_patterns = [
+        (r'(?:the\s+)?(?:final\s+)?verdict\s*(?:is|:)\s*["\']?(correct|incorrect|partial|almost)["\']?', 1),
+        (r'(?:the\s+)?(?:final\s+)?(?:grade|classification|label|assessment)\s*(?:is|:)\s*["\']?(correct|incorrect|partial|almost)["\']?', 1),
+        (r'(?:i\s+(?:would|will)\s+)?(?:classify|grade|label|mark)\s*(?:this\s+)?(?:as\s+)?["\']?(correct|incorrect|partial|almost)["\']?', 1),
+        (r'(?:this\s+(?:is|should\s+be))\s*["\']?(correct|incorrect|partial|almost)["\']?', 1),
+        (r'["\']?response["\']?\s*[:=]\s*["\']?(correct|incorrect|partial|almost)["\']?', 1),
+    ]
+    for pattern, group_idx in verdict_patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            try:
+                value = match.group(group_idx).strip().lower()
+                if value in VALID_LABELS:
+                    results.append({"response": value})
+            except Exception:
+                continue
+    
+    # Strategy 5: Look for labels in backticks, bold, or emphasized
+    formatting_patterns = [
+        r'`(correct|incorrect|partial|almost)`',
+        r'\*\*(correct|incorrect|partial|almost)\*\*',
+        r'\*(correct|incorrect|partial|almost)\*',
+        r'"(correct|incorrect|partial|almost)"',
+        r"'(correct|incorrect|partial|almost)'",
+    ]
+    for pattern in formatting_patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            try:
+                value = match.group(1).strip().lower()
+                if value in VALID_LABELS:
+                    results.append({"response": value})
+            except Exception:
+                continue
+    
+    # Strategy 6: Look for standalone labels at the end (last 5 lines)
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    if lines:
+        for line in reversed(lines[-5:]):
+            line_clean = line.lower().strip('"\'.,!?:;`*[]{}()')
+            for label in VALID_LABELS:
+                if line_clean == label:
+                    results.append({"response": label})
+                    break
+    
+    # Strategy 7: Handle malformed JSON with common LLM errors
+    # Look for patterns like: {"response": "correct"} (with extra braces or missing quotes)
+    malformed_patterns = [
+        r'\{\s*["\']?response["\']?\s*:\s*["\']?(correct|incorrect|partial|almost)["\']?\s*\}',
+        r'response\s*:\s*["\']?(correct|incorrect|partial|almost)["\']?',
+        r'["\']?response["\']?\s*[=:]\s*["\']?(correct|incorrect|partial|almost)["\']?',
+    ]
+    for pattern in malformed_patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            try:
+                # Try to extract the label from the match
+                for group in match.groups():
+                    if group and group.lower() in VALID_LABELS:
+                        results.append({"response": group.lower()})
+                        break
+            except Exception:
+                continue
+    
+    # Strategy 8: Look for JSON-like structures with single quotes
+    single_quote_pattern = r"\{\s*'response'\s*:\s*'(correct|incorrect|partial|almost)'\s*\}"
+    for match in re.finditer(single_quote_pattern, text, re.IGNORECASE):
+        try:
+            value = match.group(1).strip().lower()
+            if value in VALID_LABELS:
+                results.append({"response": value})
+        except Exception:
+            continue
+    
+    # Remove duplicates while preserving order (last occurrence wins)
+    seen = set()
+    unique_results = []
+    for r in reversed(results):
+        resp_val = r.get("response", "")
+        if resp_val and resp_val not in seen:
+            seen.add(resp_val)
+            unique_results.insert(0, r)
+    
+    return unique_results if unique_results else None
+
+
+def _try_parse_json_with_fallbacks(json_str: str) -> dict | None:
+    """Try to parse JSON string with multiple fallback strategies.
+    
+    Handles common LLM output issues like:
+    - Single vs double quotes
+    - Trailing commas
+    - Missing quotes around keys/values
+    - Extra whitespace and newlines
+    - Unicode characters
+    """
+    if not json_str or not isinstance(json_str, str):
+        return None
+    
+    json_str = json_str.strip()
+    
+    # Try 1: Direct parsing
+    try:
+        parsed = json.loads(json_str)
+        if isinstance(parsed, dict) and "response" in parsed:
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    
+    # Try 2: Replace single quotes with double quotes (carefully)
+    try:
+        # Only replace single quotes that are likely JSON delimiters
+        fixed = json_str.replace("'", '"')
+        parsed = json.loads(fixed)
+        if isinstance(parsed, dict) and "response" in parsed:
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    
+    # Try 3: Remove trailing commas
+    try:
+        fixed = re.sub(r',\s*}', '}', json_str)
+        fixed = re.sub(r',\s*]', ']', fixed)
+        parsed = json.loads(fixed)
+        if isinstance(parsed, dict) and "response" in parsed:
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    
+    # Try 4: Fix common JSON syntax errors
+    try:
+        # Remove comments
+        fixed = re.sub(r'//.*?\n', '\n', json_str)
+        fixed = re.sub(r'/\*.*?\*/', '', fixed, flags=re.DOTALL)
+        # Fix unquoted keys
+        fixed = re.sub(r'(\w+):', r'"\1":', fixed)
+        parsed = json.loads(fixed)
+        if isinstance(parsed, dict) and "response" in parsed:
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    
+    # Try 5: Extract response field with regex (more flexible)
+    try:
+        # Match response field with various quote styles
+        match = re.search(r'["\']?response["\']?\s*[:=]\s*["\']?([^"\'\}\n,]+)', json_str, re.IGNORECASE)
+        if match:
+            value = match.group(1).strip().lower()
+            # Clean up trailing punctuation
+            value = re.sub(r'[.,;:!?\'"`]+$', '', value)
+            if value in VALID_LABELS:
+                return {"response": value}
+    except Exception:
+        pass
+    
+    # Try 6: Look for any valid label in the string
+    try:
+        text_lower = json_str.lower()
+        for label in VALID_LABELS:
+            if re.search(rf'\b{label}\b', text_lower):
+                return {"response": label}
+    except Exception:
+        pass
+    
+    # Try 7: Handle escaped characters
+    try:
+        fixed = json_str.encode('utf-8').decode('unicode_escape')
+        parsed = json.loads(fixed)
+        if isinstance(parsed, dict) and "response" in parsed:
+            return parsed
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    
+    return None
+
+
+def _normalize_label(value: str) -> str | None:
+    """Normalize a label value to one of the valid labels.
+    
+    Handles various input formats including:
+    - Direct label matches
+    - Common misspellings and variations
+    - Punctuation and whitespace
+    - Partial matches and fuzzy matching
+    """
+    if not value or not isinstance(value, str):
+        return None
+    
+    clean = value.strip().lower()
+    
+    # Remove common punctuation and whitespace variations
+    clean_no_punct = re.sub(r'[^a-z\s]', '', clean).strip()
+    clean_single = re.sub(r'[^a-z]', '', clean)
+    
+    # Direct match (exact)
+    if clean_no_punct in VALID_LABELS:
+        return LABEL_CANONICAL.get(clean_no_punct, clean_no_punct)
+    
+    # Check aliases (exact match)
+    for label, aliases in LABEL_ALIASES.items():
+        for alias in aliases:
+            if clean_no_punct == alias.lower():
+                return label
+    
+    # Check for partial matches in aliases
+    for label, aliases in LABEL_ALIASES.items():
+        for alias in aliases:
+            alias_clean = re.sub(r'[^a-z]', '', alias.lower())
+            if clean_single == alias_clean or clean_no_punct == alias.lower():
+                return label
+    
+    # Fuzzy matching with priority order
+    # Check for "incorrect" first (highest priority for safety)
+    if clean_single == 'incorrect' or clean_single.startswith('incorr') or clean_single.startswith('wrong'):
+        return 'incorrect'
+    if 'notcorrect' in clean_single or 'notright' in clean_single:
+        return 'incorrect'
+    
+    # Check for "almost" (before "partial" since "almost" is more specific)
+    # "Almost" indicates a solution that is nearly complete with only tiny gaps
+    if clean_single == 'almost' or clean_single.startswith('almost'):
+        return 'almost'
+    if clean_single == 'nearly' or clean_single.startswith('nearly'):
+        return 'almost'
+    if 'nearlycomplete' in clean_single or 'almostcomplete' in clean_single:
+        return 'almost'
+    if 'nearlycorrect' in clean_single or 'almostcorrect' in clean_single:
+        return 'almost'
+    if 'mostlycorrect' in clean_single:
+        return 'almost'
+    if 'minorgap' in clean_single or 'tinygap' in clean_single or 'smallgap' in clean_single:
+        return 'almost'
+    if 'nearlythere' in clean_single or 'almostthere' in clean_single:
+        return 'almost'
+    
+    # Check for "partial"
+    if clean_single == 'partial' or clean_single.startswith('partial'):
+        return 'partial'
+    if clean_single == 'incomplete' or clean_single.startswith('incomplete'):
+        return 'partial'
+    if 'some' in clean_single and 'somehow' not in clean_single:
+        return 'partial'
+    if clean_single == 'half' or clean_single.startswith('half'):
+        return 'partial'
+    if 'partly' in clean_single:
+        return 'partial'
+    
+    # Check for "correct" (but not "incorrect")
+    if clean_single == 'correct' or (clean_single.startswith('correct') and 'incorrect' not in clean_single):
+        return 'correct'
+    if clean_single == 'right' and 'wrong' not in clean_single:
+        return 'correct'
+    if clean_single == 'valid' and 'invalid' not in clean_single:
+        return 'correct'
+    
+    # Check for negations that might indicate incorrect
+    if 'no' in clean_single and ('credit' in clean_single or 'marks' in clean_single):
+        return 'incorrect'
+    if clean_single == 'zero':
+        return 'incorrect'
+    
+    return None
+
+
+def _confidence_based_extraction(text: str) -> str | None:
+    """Extract label using confidence-based voting from multiple signals.
+    
+    This is a fallback method that combines multiple weak signals to make
+    a best-effort prediction when other methods fail.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    
+    text_lower = text.lower()
+    scores = {label: 0.0 for label in VALID_LABELS}
+    
+    # Signal 1: Presence of label words (weighted by position - later is stronger)
+    for label in VALID_LABELS:
+        matches = list(re.finditer(rf'\b{label}\b', text_lower))
+        for i, match in enumerate(matches):
+            # Later occurrences get higher weight
+            position_weight = (i + 1) / len(matches) if matches else 0
+            scores[label] += 0.5 + 0.5 * position_weight
+    
+    # Signal 2: Extended aliases with context
+    for label, aliases in LABEL_ALIASES_EXTENDED.items():
+        for alias in aliases:
+            if alias.lower() in text_lower:
+                scores[label] += 0.3
+    
+    # Signal 3: Positive/negative sentiment indicators
+    positive_indicators = ['valid', 'correct', 'right', 'true', 'complete', 'perfect', 'solved']
+    negative_indicators = ['wrong', 'error', 'mistake', 'flawed', 'invalid', 'false', 'incorrect']
+    
+    for indicator in positive_indicators:
+        if indicator in text_lower:
+            scores['correct'] += 0.2
+            scores['almost'] += 0.1
+    
+    for indicator in negative_indicators:
+        if indicator in text_lower:
+            scores['incorrect'] += 0.3
+    
+    # Signal 4: Partial indicators
+    partial_indicators = ['incomplete', 'missing', 'partial', 'some', 'part', 'half', 'gap']
+    for indicator in partial_indicators:
+        if indicator in text_lower:
+            scores['partial'] += 0.25
+            scores['almost'] += 0.15
+    
+    # Signal 5: Almost indicators
+    almost_indicators = ['nearly', 'almost', 'tiny', 'minor', 'small', 'essentially']
+    for indicator in almost_indicators:
+        if indicator in text_lower:
+            scores['almost'] += 0.3
+    
+    # Signal 6: Pattern matching indicators (strong signal for INCORRECT)
+    pattern_count = 0
+    for indicator in PATTERN_MATCHING_INDICATORS:
+        if indicator.lower() in text_lower:
+            pattern_count += 1
+    # If we see multiple pattern matching indicators, strongly boost "incorrect"
+    if pattern_count >= 2:
+        scores['incorrect'] += 0.5 * pattern_count
+    
+    # Signal 7: Valid proof technique indicators (signal for PARTIAL or better)
+    technique_count = 0
+    for indicator in VALID_TECHNIQUE_INDICATORS:
+        if indicator.lower() in text_lower:
+            technique_count += 1
+    # If we see proof techniques, reduce "incorrect" score and boost "partial"
+    if technique_count >= 2:
+        scores['partial'] += 0.3 * technique_count
+        scores['incorrect'] = max(0, scores['incorrect'] - 0.2 * technique_count)
+    
+    # Apply confidence thresholds
+    for label, threshold in CONFIDENCE_THRESHOLDS.items():
+        if scores[label] < threshold:
+            scores[label] = 0
+    
+    # Return the highest scoring label if it meets threshold
+    if scores:
+        best_label = max(scores, key=scores.get)
+        if scores[best_label] > 0:
+            return best_label
+    
+    return None
+
+
+def _detect_pattern_matching_in_analysis(text: str) -> bool:
+    """Detect if the LLM's analysis mentions pattern matching as a concern.
+    
+    This helps identify when the LLM is analyzing a solution that only checks examples.
+    """
+    if not text or not isinstance(text, str):
+        return False
+    
+    text_lower = text.lower()
+    
+    # Strong indicators that the solution is pattern matching only
+    strong_indicators = [
+        "only checked examples", "only verified examples", "only tested",
+        "pattern matching without proof", "no general proof",
+        "no general argument", "no valid proof technique",
+        "just checking values", "just verifying cases",
+        "computational only", "no demonstration of understanding",
+    ]
+    
+    for indicator in strong_indicators:
+        if indicator in text_lower:
+            return True
+    
+    # Count pattern matching indicators
+    pattern_count = sum(1 for ind in PATTERN_MATCHING_INDICATORS if ind.lower() in text_lower)
+    technique_count = sum(1 for ind in VALID_TECHNIQUE_INDICATORS if ind.lower() in text_lower)
+    
+    # If we see many pattern indicators but few proof techniques, likely pattern matching
+    if pattern_count >= 3 and technique_count < 2:
+        return True
+    
+    return False
+
+
+def _extract_label_from_text(text: str) -> str | None:
+    """Extract the grading label from raw text using pattern matching.
+    
+    Uses multiple priority strategies to find the most likely label:
+    1. JSON blocks at the end (most reliable)
+    2. Explicit declarations with colons/equals
+    3. Formatted labels (backticks, bold)
+    4. Labels at end of text
+    5. Count-based with priority tie-breaking
+    6. Last line matching
+    7. Context-aware extraction using pattern matching detection
+    """
+    if not text or not isinstance(text, str):
+        return None
+        
+    text_lower = text.lower().strip()
+    lines = [line.strip() for line in text_lower.split('\n') if line.strip()]
+    
+    # Priority 0: Look for JSON block at the very end (most reliable)
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        if not line:
+            continue
+        # Check for JSON block format
+        if '<json>' in line and '</json>' in line:
+            start = line.find('<json>')
+            end = line.find('</json>') + 7
+            if start != -1 and end > start:
+                inner = line[start + 6:end - 7].strip()
+                parsed = _try_parse_json_with_fallbacks(inner)
+                if parsed and "response" in parsed:
+                    value = str(parsed["response"]).strip().lower()
+                    if value in VALID_LABELS:
+                        return LABEL_CANONICAL.get(value, value)
+    
+    # Priority 0.5: Look for JSON block across multiple lines (common LLM output format)
+    full_text = '\n'.join(lines)
+    json_block_pattern = r'<json>\s*(\{[^}]*\})\s*</json>'
+    json_matches = list(re.finditer(json_block_pattern, full_text, re.DOTALL))
+    if json_matches:
+        # Use the last JSON block
+        last_json = json_matches[-1].group(1)
+        parsed = _try_parse_json_with_fallbacks(last_json)
+        if parsed and "response" in parsed:
+            value = str(parsed["response"]).strip().lower()
+            if value in VALID_LABELS:
+                return LABEL_CANONICAL.get(value, value)
+    
+    # Priority 1: Look for explicit label declarations with colons
+    label_alternatives = "correct|incorrect|partial|almost"
+    declaration_patterns = [
+        rf'(?:verdict|grade|label|classification|assessment|evaluation)\s*[:=]\s*["\']?({label_alternatives})["\']?\b',
+        rf'(?:the\s+answer\s+is)\s*["\']?({label_alternatives})["\']?\b',
+        rf'(?:this\s+is)\s*["\']?({label_alternatives})["\']?\b',
+        rf'["\']?response["\']?\s*[:=]\s*["\']?({label_alternatives})["\']?\b',
+        rf'(?:final\s+)?(?:answer|verdict|grade)\s*[:=]\s*["\']?({label_alternatives})["\']?\b',
+    ]
+    
+    for pattern in declaration_patterns:
+        matches = list(re.finditer(pattern, text_lower))
+        if matches:
+            # Use the LAST match (most likely to be the final verdict)
+            last_match = matches[-1]
+            for group in last_match.groups():
+                if group in VALID_LABELS:
+                    return LABEL_CANONICAL.get(group, group)
+    
+    # Priority 2: Look for labels in code blocks or backticks
+    for label in VALID_LABELS:
+        if re.search(rf'`{label}`', text_lower):
+            return LABEL_CANONICAL.get(label, label)
+        if re.search(rf'\*\*{label}\*\*|\*{label}\*', text_lower):
+            return LABEL_CANONICAL.get(label, label)
+        if re.search(rf'"{label}"|\'{label}\'', text_lower):
+            return LABEL_CANONICAL.get(label, label)
+    
+    # Priority 3: Look for labels at the end of the text
+    for label in VALID_LABELS:
+        if re.search(rf'\b{label}\b[.!?]*\s*$', text_lower):
+            return LABEL_CANONICAL.get(label, label)
+    
+    # Priority 4: Count occurrences and use priority to break ties
+    label_counts = {}
+    for label in VALID_LABELS:
+        count = len(re.findall(rf'\b{label}\b', text_lower))
+        label_counts[label] = count
+    
+    if any(label_counts.values()):
+        valid_counts = {k: v for k, v in label_counts.items() if v > 0}
+        if valid_counts:
+            max_count = max(valid_counts.values())
+            candidates = [k for k, v in valid_counts.items() if v == max_count]
+            if len(candidates) == 1:
+                return LABEL_CANONICAL.get(candidates[0], candidates[0])
+            else:
+                # Use priority to break ties
+                best = max(candidates, key=lambda x: LABEL_PRIORITY.get(x, 0))
+                return LABEL_CANONICAL.get(best, best)
+    
+    # Priority 5: Look at the last line for any valid label
+    if lines:
+        last_line = lines[-1]
+        for label in VALID_LABELS:
+            if label in last_line:
+                return LABEL_CANONICAL.get(label, label)
+    
+    # Priority 6: Check last 3 lines for standalone labels with more flexible matching
+    if lines:
+        for line in reversed(lines[-3:]):
+            line_clean = line.strip('"\'`*[]{}()')
+            for label in VALID_LABELS:
+                if line_clean == label:
+                    return LABEL_CANONICAL.get(label, label)
+    
+    # Priority 7: Look for label mentions in analysis/verdict sections
+    verdict_section_patterns = [
+        r'(?:verdict|conclusion|assessment|grade)\s*[:\-]?\s*\n?\s*(correct|incorrect|partial|almost)',
+        r'(?:therefore|thus|hence|so)\s*[,:]?\s*(correct|incorrect|partial|almost)',
+    ]
+    for pattern in verdict_section_patterns:
+        matches = list(re.finditer(pattern, text_lower, re.IGNORECASE))
+        if matches:
+            last_match = matches[-1]
+            for group in last_match.groups():
+                if group in VALID_LABELS:
+                    return LABEL_CANONICAL.get(group, group)
+    
+    # Priority 8: Context-aware extraction - check if analysis mentions pattern matching
+    if _detect_pattern_matching_in_analysis(text_lower):
+        # If pattern matching is detected in analysis, prefer "incorrect"
+        # unless there's strong evidence of another label
+        if label_counts.get('incorrect', 0) > 0 or label_counts.get('partial', 0) == 0:
+            return 'incorrect'
+    
+    return None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract fields from inputs
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+        
+        # Enhanced instruction with chain-of-thought and better few-shot examples
+        instruction = f"""You are an expert IMO mathematics grader. Your task is to evaluate a student's solution and classify it into EXACTLY ONE category.
+
+## GRADING CATEGORIES
+
+**"correct"** - Complete, correct solution with all steps valid and logically sound. Full marks.
+**"incorrect"** - Fundamental flaw: no valid approach, only pattern matching from examples, or complete misunderstanding. Zero credit.
+**"partial"** - Valid approach showing genuine understanding, but incomplete or has execution errors. Partial credit (typically 30-70%).
+**"almost"** - Nearly complete solution (85%+), only minor gap or small error. High partial credit (typically 70-90%).
+
+## CRITICAL DISTINCTIONS
+
+### PARTIAL vs INCORRECT (Most Important!)
+Ask: "Did the student demonstrate ANY valid mathematical understanding?"
+
+**PARTIAL** (Valid insight demonstrated):
+- Uses a correct theorem or formula, even if applied imperfectly
+- Shows understanding of the problem structure
+- Makes meaningful progress toward solution
+- Has calculation errors but right approach
+- Incomplete proof but valid technique shown
+- **Key test**: Would a tutor say "You're on the right track, just need to fix X"?
+
+**INCORRECT** (No valid understanding):
+- Only checks small examples without general argument (THIS IS THE #1 REASON FOR INCORRECT)
+- Uses completely wrong method (e.g., wrong formula)
+- Fundamental mathematical misconception
+- Random guessing or irrelevant work
+- **Key test**: Would a tutor need to re-explain the problem from scratch?
+
+**CRITICAL RULE**: If the student ONLY checks examples (n=1, n=2, n=3...) without providing a GENERAL PROOF, this is INCORRECT. Pattern matching is NOT a proof.
+
+**Golden Rule**: When in doubt between "partial" and "incorrect", choose "partial" if ANY valid mathematical thinking is present. BUT if the solution is just example-checking with no general argument, it is INCORRECT.
+
+### PARTIAL vs ALMOST (Second Most Important!)
+Ask: "How close is the solution to being complete and correct?"
+
+**ALMOST** (85-95% complete, tiny gaps):
+- Solution structure is essentially complete
+- Main proof technique correctly applied
+- Only minor details missing (e.g., edge case, explicit statement of obvious fact)
+- Small calculation error that doesn't affect main result
+- Missing a single verification step
+- **Key test**: Would a tutor say "This is basically right, just needs a small fix"?
+
+**PARTIAL** (30-70% complete, significant gaps):
+- Valid approach but incomplete execution
+- Missing major parts of the proof
+- Significant calculation errors affecting result
+- Incomplete verification or justification
+- **Key test**: Would a tutor say "Good start, but you need to work on the rest"?
+
+**Golden Rule**: "Almost" is for solutions that are nearly perfect. "Partial" is for solutions with valid ideas but significant work remaining.
+
+## DETAILED FEW-SHOT EXAMPLES
+
+### Example 1 - CORRECT (Complete rigorous proof)
+Problem: Prove there are infinitely many primes.
+Student: Suppose finitely many primes p₁,...,pₙ. Let N = p₁×...×pₙ + 1. For each pᵢ, N mod pᵢ = 1, so pᵢ doesn't divide N. Thus N has a prime factor not in our list. Contradiction.
+Analysis: Complete proof with valid construction and logical conclusion. All steps correct.
+Verdict: <json>{{"response": "correct"}}</json>
+
+### Example 2 - INCORRECT (Pattern matching without proof)
+Problem: Prove sum of first n odd numbers equals n².
+Student: n=1: 1=1². n=2: 1+3=4=2². n=3: 1+3+5=9=3². The pattern holds for all n.
+Analysis: Only checked examples, no general proof. No valid proof technique demonstrated. No understanding of WHY it works.
+Verdict: <json>{{"response": "incorrect"}}</json>
+
+### Example 3 - PARTIAL (Valid insight, incomplete execution)
+Problem: Prove n³-n is divisible by 6 for all integers n.
+Student: n³-n = n(n-1)(n+1). This is the product of 3 consecutive integers. One of them must be even, so divisible by 2.
+Analysis: Excellent factorization and valid insight about divisibility by 2. Student understands the problem structure and key technique. Only missing: didn't prove divisibility by 3 (also true for 3 consecutive integers). Valid approach, incomplete proof.
+Verdict: <json>{{"response": "partial"}}</json>
+
+### Example 4 - INCORRECT (Fundamental mathematical error)
+Problem: Find all real x where |x-1| + |x+1| = 2.
+Student: |x-1| + |x+1| = |(x-1)+(x+1)| = |2x| = 2. So |x| = 1, meaning x = ±1.
+Analysis: The step |a|+|b| = |a+b| is FALSE in general (triangle inequality is |a+b| ≤ |a|+|b|). This is a fundamental misunderstanding of absolute value properties. No valid approach demonstrated.
+Verdict: <json>{{"response": "incorrect"}}</json>
+
+### Example 5 - PARTIAL (Right method, execution error)
+Problem: Find the number of diagonals in a convex n-gon.
+Student: From each vertex, we can draw n-3 diagonals (to all non-adjacent vertices). With n vertices, total = n(n-3). For n=5: 5×2=10. But the actual answer is 5. I forgot to divide by 2 since each diagonal is counted twice.
+Analysis: Correct method and formula structure. Valid understanding of the problem. Just a counting error (double counting). Shows genuine competence - the error is recognized and explained.
+Verdict: <json>{{"response": "partial"}}</json>
+
+### Example 6 - ALMOST (Nearly complete, tiny gap)
+Problem: Prove the AM-GM inequality for two positive numbers.
+Student: For a,b > 0, we want (a+b)/2 ≥ √ab. This is equivalent to a+b ≥ 2√ab, then (a+b)² ≥ 4ab, then a²+2ab+b² ≥ 4ab, so a²-2ab+b² ≥ 0, which is (a-b)² ≥ 0. This is always true.
+Analysis: Perfect proof structure. Valid algebraic manipulation. Only minor issue: should explicitly state that squaring preserves inequality since a+b > 0, and that equality holds when a=b. Nearly complete, just needs these small additions.
+Verdict: <json>{{"response": "almost"}}</json>
+
+### Example 7 - PARTIAL (Valid technique, incomplete verification)
+Problem: Find the maximum of f(x) = x(1-x) on [0,1].
+Student: Take derivative: f'(x) = 1 - 2x. Set to 0: 1-2x=0, so x=1/2. Maximum is f(1/2) = 1/4.
+Analysis: Correct technique (calculus), but student forgot to verify it's a maximum (could be min). Should check second derivative or endpoints. Valid approach, just incomplete verification. This is a significant gap, not a tiny one.
+Verdict: <json>{{"response": "partial"}}</json>
+
+### Example 8 - INCORRECT (Wrong approach entirely)
+Problem: Prove that √2 is irrational.
+Student: √2 ≈ 1.41421356... The decimal goes on forever without repeating, so it can't be written as a fraction. Therefore irrational.
+Analysis: This is circular reasoning - the student assumes what they're trying to prove (that √2 has infinite non-repeating decimal). No valid proof technique. The standard proof by contradiction is not used.
+Verdict: <json>{{"response": "incorrect"}}</json>
+
+### Example 9 - PARTIAL (Good start, didn't finish)
+Problem: Prove by induction that 1+2+...+n = n(n+1)/2.
+Student: Base case: n=1, 1 = 1(2)/2 = 1 ✓. Inductive step: Assume true for n=k, so 1+...+k = k(k+1)/2. Then for n=k+1...
+Analysis: Student correctly set up induction framework. Base case verified. Inductive hypothesis stated correctly. Just didn't complete the inductive step calculation. Clear understanding of the method, but significant work missing.
+Verdict: <json>{{"response": "partial"}}</json>
+
+### Example 10 - ALMOST (Complete proof, tiny omission)
+Problem: Prove that for any real numbers a, b, c: a² + b² + c² ≥ ab + bc + ca.
+Student: We have (a-b)² ≥ 0, so a² + b² ≥ 2ab. Similarly (b-c)² ≥ 0 gives b² + c² ≥ 2bc, and (c-a)² ≥ 0 gives c² + a² ≥ 2ca. Adding: 2(a²+b²+c²) ≥ 2(ab+bc+ca), so a²+b²+c² ≥ ab+bc+ca.
+Analysis: Beautiful proof using sum of squares. All steps valid. Only tiny omission: should explicitly state that squares are always non-negative (≥ 0). The proof is essentially complete.
+Verdict: <json>{{"response": "almost"}}</json>
+
+### Example 11 - ALMOST (Correct answer, minor justification gap)
+Problem: Find all positive integers n such that n² + 3n + 2 is prime.
+Student: n² + 3n + 2 = (n+1)(n+2). For this to be prime, one factor must be 1. Since n+1 < n+2, we need n+1 = 1, so n = 0. But n must be positive, so no solutions.
+Analysis: Correct factorization and reasoning. Only minor issue: should explicitly state that for a product to be prime, exactly one factor must equal 1 (and the other must be prime). Also should note that n=0 gives 2 which is prime, but 0 is not positive. Nearly complete.
+Verdict: <json>{{"response": "almost"}}</json>
+
+### Example 12 - PARTIAL (Correct approach, significant gap)
+Problem: Prove that the sum of angles in a triangle is 180°.
+Student: Draw a line through one vertex parallel to the opposite side. The alternate angles are equal, so the three angles at that vertex add to 180°.
+Analysis: Correct geometric construction and insight. However, the student didn't fully explain WHY the alternate angles are equal, and didn't explicitly show how the triangle's angles correspond to the angles on the straight line. Valid approach but needs more detailed explanation.
+Verdict: <json>{{"response": "partial"}}</json>
+
+### Example 13 - INCORRECT (Computational only, no proof)
+Problem: Prove that the product of any three consecutive positive integers is divisible by 6.
+Student: 1×2×3=6, 2×3×4=24, 3×4×5=60, 4×5×6=120. All divisible by 6.
+Analysis: Student only verified specific examples. No general proof provided. No demonstration of understanding WHY this is always true (one of three consecutive integers is divisible by 2, one by 3). This is pattern matching without proof.
+Verdict: <json>{{"response": "incorrect"}}</json>
+
+### Example 14 - PARTIAL (Correct setup, wrong conclusion)
+Problem: Find all x such that x² - 5x + 6 = 0.
+Student: Factoring: (x-2)(x-3) = 0. So x = 2.
+Analysis: Correct factoring technique demonstrated. Student understands how to solve quadratic equations. However, missed the second solution x = 3. Valid approach with execution error.
+Verdict: <json>{{"response": "partial"}}</json>
+
+### Example 15 - ALMOST (Complete solution, tiny error)
+Problem: Prove that if n is odd, then n² ≡ 1 (mod 8).
+Student: Let n = 2k+1. Then n² = 4k² + 4k + 1 = 4k(k+1) + 1. Since k(k+1) is always even, 4k(k+1) is divisible by 8. Thus n² ≡ 1 (mod 8).
+Analysis: Perfect proof structure. Correct algebraic expansion. Valid reasoning about divisibility. Only tiny gap: should explicitly state that k(k+1) is even because one of k, k+1 must be even. The proof is essentially complete.
+Verdict: <json>{{"response": "almost"}}</json>
+
+### Example 16 - INCORRECT (Pattern matching without general proof)
+Problem: Prove that for any positive integer n, the sum 1 + 2 + ... + n equals n(n+1)/2.
+Student: n=1: 1 = 1(2)/2 = 1 ✓. n=2: 1+2 = 3 = 2(3)/2 = 3 ✓. n=3: 1+2+3 = 6 = 3(4)/2 = 6 ✓. n=4: 1+2+3+4 = 10 = 4(5)/2 = 10 ✓. The formula holds for all n.
+Analysis: Student ONLY checked examples. No general proof provided. No induction, no pairing argument, no algebraic demonstration. This is pure pattern matching, not a proof. The student has shown no understanding of WHY the formula works.
+Verdict: <json>{{"response": "incorrect"}}</json>
+
+### Example 17 - PARTIAL (Valid proof technique, incomplete)
+Problem: Prove that for any positive integer n, the sum 1 + 2 + ... + n equals n(n+1)/2.
+Student: We use induction. Base case n=1: 1 = 1(2)/2 = 1 ✓. Assume true for n=k, so 1+2+...+k = k(k+1)/2. Then for n=k+1: 1+2+...+k+(k+1) = k(k+1)/2 + (k+1) = ...
+Analysis: Student correctly set up induction framework. Base case verified. Inductive hypothesis stated correctly. Just didn't complete the inductive step calculation. Clear understanding of the method, but significant work missing.
+Verdict: <json>{{"response": "partial"}}</json>
+
+### Example 18 - INCORRECT (Wrong method entirely)
+Problem: Find the maximum value of f(x) = x² - 4x + 5 on the interval [0, 3].
+Student: f(0) = 5, f(1) = 2, f(2) = 1, f(3) = 2. The maximum is 5 at x=0.
+Analysis: Student only evaluated at integer points. For a continuous function on a closed interval, we need to check critical points (where f'(x)=0) and endpoints. The student missed that f'(x) = 2x-4 = 0 at x=2, which is already checked. But more importantly, the method is wrong - checking only integers is not sufficient for finding extrema of continuous functions. No valid calculus approach shown.
+Verdict: <json>{{"response": "incorrect"}}</json>
+
+### Example 19 - ALMOST (Complete proof, tiny gap)
+Problem: Prove that √2 is irrational.
+Student: Suppose √2 = p/q where p,q are integers with no common factors. Then 2 = p²/q², so p² = 2q². Thus p² is even, so p is even. Let p = 2k. Then 4k² = 2q², so 2k² = q². Thus q² is even, so q is even. But then p and q are both even, contradicting our assumption.
+Analysis: Excellent proof by contradiction. All logical steps valid. The only tiny gap is not explicitly stating that we assumed p/q is in lowest terms (no common factors) at the beginning, though this is implied. The proof is essentially complete.
+Verdict: <json>{{"response": "almost"}}</json>
+
+### Example 20 - PARTIAL vs ALMOST distinction
+Problem: Prove that in any group of 6 people, there are either 3 mutual friends or 3 mutual strangers.
+Student: Consider person A. By pigeonhole principle, A has at least 3 friends or at least 3 strangers among the other 5. Case 1: A has 3 friends B,C,D. If any two of B,C,D are friends, we have 3 mutual friends with A. If none of B,C,D are friends, they form 3 mutual strangers. Case 2: A has 3 strangers. Similar argument applies.
+Analysis: Correct application of pigeonhole principle. Valid case analysis. The proof structure is essentially complete. However, the student should explicitly state the conclusion: "In either case, we have found either 3 mutual friends or 3 mutual strangers." This is a nearly complete proof with only a minor concluding statement missing.
+Verdict: <json>{{"response": "almost"}}</json>
+
+## CHAIN-OF-THOUGHT ANALYSIS PROCESS
+
+Analyze the student's solution step by step:
+
+1. **Understanding**: Does the student correctly understand what the problem is asking?
+2. **Approach Validity**: Is their overall approach mathematically sound?
+3. **Key Insight**: Did they identify the crucial insight or technique needed?
+4. **Execution**: Are the calculations and logical steps correct?
+5. **Completeness**: Is the solution fully finished, or are there gaps? (Estimate percentage: 30%, 70%, 90%, 100%?)
+6. **Pattern Matching Check**: CRITICAL - Did the student only check examples without a general proof? If YES, this is likely INCORRECT.
+7. **Classification Decision**: Based on the above, which category fits best?
+   - Complete and correct → "correct"
+   - Nearly complete (85%+), tiny gap → "almost"
+   - Valid approach but significant gaps (30-70%) → "partial"
+   - No valid understanding OR only pattern matching → "incorrect"
+
+**DECISION TREE**:
+- Is the solution complete and fully correct? → "correct"
+- Is it 85-95% complete with only tiny gaps? → "almost"
+- Does it show valid mathematical thinking but have significant gaps? → "partial"
+- Is it just pattern matching (only checking examples)? → "incorrect"
+- Does it have fundamental mathematical errors with no valid approach? → "incorrect"
+
+After this analysis, make your classification decision.
+
+## CURRENT PROBLEM
+
+PROBLEM:
+```
+{problem}
+```
+
+OFFICIAL SOLUTION:
+```
+{solution}
+```
+
+GRADING GUIDELINES:
+```
+{grading_guidelines}
+```
+
+STUDENT'S ANSWER:
+```
+{student_answer}
+```
+
+## YOUR TASK
+
+First, provide your chain-of-thought analysis following the 6 steps above.
+
+Then, output EXACTLY ONE of these JSON blocks (this must be the FINAL line of your response):
+
+<json>{{"response": "correct"}}</json>
+<json>{{"response": "incorrect"}}</json>
+<json>{{"response": "partial"}}</json>
+<json>{{"response": "almost"}}</json>
+
+CRITICAL INSTRUCTIONS:
+1. The JSON block MUST be on its own line at the very end
+2. Use the EXACT format shown above with <json> and </json> tags
+3. Do not add any text after the JSON block
+4. Do not use markdown code blocks (```) around the JSON
+5. The response field must be one of: correct, incorrect, partial, almost
+6. When uncertain between partial and incorrect, prefer "partial" if any valid math is shown
+7. When uncertain between partial and almost: "almost" is for 85%+ complete solutions with only tiny gaps; "partial" is for solutions with significant work remaining
+8. Compare the student's answer to the official solution to assess correctness"""
+
+        # Try up to 3 times to get a valid prediction
+        max_retries = 3
+        prediction = None
+        msg_history = []
+        all_responses = []  # Track all responses for consensus
+        all_predictions = []  # Track all valid predictions for voting
+        
+        for attempt in range(max_retries):
+            try:
+                # On retry, add a stronger reminder about output format
+                msg_to_send = instruction
+                if attempt > 0:
+                    msg_to_send += f'''\n\nCRITICAL: Your previous response did not contain a valid JSON block. You MUST output exactly one of these as the FINAL line:
+<json>{{"response": "correct"}}</json>
+<json>{{"response": "incorrect"}}</json>
+<json>{{"response": "partial"}}</json>
+<json>{{"response": "almost"}}</json>
+
+Remember: The JSON block MUST be the very last line of your response with no text after it.'''
+                
+                response, msg_history, info = get_response_from_llm(
+                    msg=msg_to_send,
+                    model=self.model,
+                    msg_history=[],
+                )
+            except Exception as e:
+                self.log_fn(f"Attempt {attempt + 1}: LLM call failed: {e}")
+                continue
+
+            text_to_parse = (response or "").strip()
+            all_responses.append(text_to_parse)
+            
+            # Debug logging - log end of response where JSON should be
+            self.log_fn(f"Attempt {attempt + 1}: Raw LLM response (last 500 chars): ...{text_to_parse[-500:]}")
+            
+            attempt_prediction = None
+            
+            try:
+                # PRIORITY 1: Extract from <json> blocks (most reliable)
+                extracted = _extract_jsons(text_to_parse)
+                if extracted:
+                    self.log_fn(f"Attempt {attempt + 1}: Extracted {len(extracted)} JSON objects")
+                    # Use the LAST extracted JSON (most likely to be the final verdict)
+                    for item in reversed(extracted):
+                        if isinstance(item, dict) and "response" in item:
+                            raw_pred = str(item["response"]).strip().lower()
+                            self.log_fn(f"Attempt {attempt + 1}: Found response field: {raw_pred}")
+                            normalized = _normalize_label(raw_pred)
+                            if normalized:
+                                attempt_prediction = LABEL_CANONICAL.get(normalized, normalized)
+                                self.log_fn(f"Attempt {attempt + 1}: Normalized to: {attempt_prediction}")
+                                break
+                
+                # PRIORITY 2: If JSON extraction failed, try text extraction
+                if attempt_prediction is None:
+                    text_pred = _extract_label_from_text(text_to_parse)
+                    if text_pred:
+                        self.log_fn(f"Attempt {attempt + 1}: Extracted label from text: {text_pred}")
+                        attempt_prediction = LABEL_CANONICAL.get(text_pred, text_pred)
+                
+                # PRIORITY 3: Look for high confidence patterns in raw text
+                if attempt_prediction is None:
+                    text_lower = text_to_parse.lower()
+                    
+                    # High confidence patterns - exact JSON format
+                    high_confidence_patterns = [
+                        (r'<json>\s*\{\s*"response"\s*:\s*"correct"\s*\}\s*</json>', 'correct'),
+                        (r'<json>\s*\{\s*"response"\s*:\s*"incorrect"\s*\}\s*</json>', 'incorrect'),
+                        (r'<json>\s*\{\s*"response"\s*:\s*"partial"\s*\}\s*</json>', 'partial'),
+                        (r'<json>\s*\{\s*"response"\s*:\s*"almost"\s*\}\s*</json>', 'almost'),
+                        (r'response\s*[=:]\s*"correct"', 'correct'),
+                        (r'response\s*[=:]\s*"incorrect"', 'incorrect'),
+                        (r'response\s*[=:]\s*"partial"', 'partial'),
+                        (r'response\s*[=:]\s*"almost"', 'almost'),
+                    ]
+                    
+                    for pattern, label in high_confidence_patterns:
+                        if re.search(pattern, text_lower):
+                            attempt_prediction = label
+                            self.log_fn(f"Attempt {attempt + 1}: High confidence pattern matched: '{label}'")
+                            break
+                
+                # PRIORITY 4: Look for standalone labels at the very end (last 3 lines)
+                if attempt_prediction is None:
+                    lines = [line.strip() for line in text_to_parse.split('\n') if line.strip()]
+                    if lines:
+                        # Check last 3 lines for standalone labels
+                        for line in reversed(lines[-3:]):
+                            line_lower = line.lower()
+                            for label in VALID_LABELS:
+                                # Match label possibly surrounded by quotes, punctuation, or markdown
+                                if re.search(rf'^[\s"\'\*\`]*{label}[\s"\'\*\`\.,!?:;]*$', line_lower, re.IGNORECASE):
+                                    attempt_prediction = label
+                                    self.log_fn(f"Attempt {attempt + 1}: Found standalone label '{label}' at end")
+                                    break
+                            if attempt_prediction:
+                                break
+                
+                # PRIORITY 5: Look for the LAST occurrence of any valid label in the text
+                if attempt_prediction is None:
+                    text_lower = text_to_parse.lower()
+                    last_positions = {}
+                    for label in VALID_LABELS:
+                        matches = list(re.finditer(rf'\b{label}\b', text_lower))
+                        if matches:
+                            last_positions[label] = matches[-1].start()
+                    
+                    if last_positions:
+                        # Get the label that appears last in the text
+                        last_label = max(last_positions, key=last_positions.get)
+                        attempt_prediction = last_label
+                        self.log_fn(f"Attempt {attempt + 1}: Found label '{attempt_prediction}' as last occurrence")
+                
+                # PRIORITY 6: Confidence-based voting from multiple signals
+                if attempt_prediction is None:
+                    attempt_prediction = _confidence_based_extraction(text_to_parse)
+                    if attempt_prediction:
+                        self.log_fn(f"Attempt {attempt + 1}: Confidence-based extraction: '{attempt_prediction}'")
+                
+                # If we got a valid prediction, add to predictions list
+                if attempt_prediction in VALID_LABELS:
+                    all_predictions.append(attempt_prediction)
+                    # On first successful attempt, use it immediately
+                    if prediction is None:
+                        prediction = attempt_prediction
+                        # Don't break - continue to collect more predictions for voting
+                        if attempt == 0:
+                            break
+                    
+            except Exception as e:
+                self.log_fn(f"Attempt {attempt + 1}: Error extracting prediction: {e}")
+                attempt_prediction = None
+        
+        # If we have multiple predictions, use voting with priority tie-breaking
+        if len(all_predictions) > 1:
+            self.log_fn(f"Multiple predictions collected: {all_predictions}")
+            prediction = self._vote_predictions(all_predictions)
+            self.log_fn(f"Voting result: {prediction}")
+        
+        # If all retries failed, try consensus from all responses
+        if prediction not in VALID_LABELS and len(all_responses) > 1:
+            self.log_fn("All retries failed, attempting consensus extraction...")
+            prediction = self._consensus_extraction(all_responses)
+            if prediction:
+                self.log_fn(f"Consensus extraction result: {prediction}")
+        
+        # Final validation and canonicalization
+        if prediction not in VALID_LABELS:
+            self.log_fn(f"Invalid prediction '{prediction}', defaulting to 'incorrect'")
+            prediction = "incorrect"
+        else:
+            # Map "almost" to "partial" for final output
+            if prediction == "almost":
+                prediction = "partial"
+            self.log_fn(f"Final prediction: {prediction}")
+
+        return str(prediction), msg_history
+    
+    def _vote_predictions(self, predictions: list[str]) -> str:
+        """Vote among multiple predictions to select the best one.
+        
+        Uses a weighted voting scheme that considers:
+        1. Frequency of each prediction
+        2. Label priority for tie-breaking
+        3. Special handling for pattern matching detection
+        """
+        if not predictions:
+            return "incorrect"
+        
+        if len(predictions) == 1:
+            return predictions[0]
+        
+        # Count votes
+        vote_counts = {}
+        for pred in predictions:
+            vote_counts[pred] = vote_counts.get(pred, 0) + 1
+        
+        self.log_fn(f"Vote counts: {vote_counts}")
+        
+        # Find the maximum vote count
+        max_votes = max(vote_counts.values())
+        
+        # Get all candidates with max votes
+        candidates = [k for k, v in vote_counts.items() if v == max_votes]
+        
+        if len(candidates) == 1:
+            return candidates[0]
+        
+        # Tie-breaking using label priority
+        # For IMO grading, we want to be conservative
+        best = max(candidates, key=lambda x: LABEL_PRIORITY.get(x, 0))
+        return best
+    
+    def _consensus_extraction(self, responses: list[str]) -> str | None:
+        """Extract label by consensus from multiple responses.
+        
+        When multiple LLM calls are made, use voting to determine the most likely label.
+        """
+        if not responses:
+            return None
+        
+        votes = {label: 0 for label in VALID_LABELS}
+        
+        for response in responses:
+            if not response:
+                continue
+            
+            # Try JSON extraction first
+            extracted = _extract_jsons(response)
+            if extracted:
+                for item in extracted:
+                    if isinstance(item, dict) and "response" in item:
+                        label = str(item["response"]).strip().lower()
+                        if label in VALID_LABELS:
+                            votes[label] += 2  # JSON extraction gets higher weight
+                            break
+            else:
+                # Try text extraction
+                text_pred = _extract_label_from_text(response)
+                if text_pred:
+                    votes[text_pred] += 1
+        
+        # Find the label with most votes
+        if any(votes.values()):
+            # Sort by votes, then by priority for ties
+            best_label = max(votes.keys(), key=lambda x: (votes[x], LABEL_PRIORITY.get(x, 0)))
+            if votes[best_label] > 0:
+                return best_label
+        
+        return None

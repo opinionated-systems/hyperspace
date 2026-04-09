@@ -1,0 +1,533 @@
+"""
+Task agent: solves a given task with chain-of-thought reasoning and self-reflection.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    Also handles markdown code blocks and inline JSON as fallbacks.
+    Includes robust error recovery for common LLM formatting issues.
+    """
+    results = []
+    search_from = 0
+    
+    # First try to find <json>...</json> blocks
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError as e:
+            logger.debug(f"JSON decode error in <json> block: {e}")
+            # Try to fix common LLM formatting issues
+            fixed = _attempt_json_repair(inner)
+            if fixed:
+                results.append(fixed)
+            continue
+    
+    # Fallback 1: try markdown code blocks if no <json> blocks found
+    if not results:
+        # Look for ```json ... ``` blocks
+        markdown_pattern = r'```(?:json)?\s*\n(.*?)\n```'
+        for match in re.finditer(markdown_pattern, text, re.DOTALL):
+            try:
+                results.append(json.loads(match.group(1).strip()))
+            except json.JSONDecodeError:
+                # Try repair on markdown blocks too
+                fixed = _attempt_json_repair(match.group(1).strip())
+                if fixed:
+                    results.append(fixed)
+                continue
+    
+    # Fallback 2: try to find JSON objects directly in the text
+    if not results:
+        # Look for patterns that look like JSON objects
+        json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+        for match in re.finditer(json_pattern, text, re.DOTALL):
+            try:
+                candidate = match.group(0).strip()
+                # Only accept if it has expected keys
+                parsed = json.loads(candidate)
+                if any(key in parsed for key in ['score', 'response', 'thinking', 'rationale']):
+                    results.append(parsed)
+            except (json.JSONDecodeError, ValueError):
+                continue
+    
+    return results or None
+
+
+def _attempt_json_repair(text: str) -> dict | None:
+    """Attempt to repair common JSON formatting errors from LLM outputs.
+    
+    Fixes:
+    - Trailing commas before closing braces/brackets
+    - Single quotes instead of double quotes
+    - Unquoted keys
+    - Missing quotes around string values
+    - Newlines in string values
+    - Comments in JSON (// and /* */)
+    """
+    import re
+    
+    original = text.strip()
+    
+    # Fix 1: Remove C-style comments (// and /* */)
+    repaired = re.sub(r'//[^\n]*', '', original)
+    repaired = re.sub(r'/\*.*?\*/', '', repaired, flags=re.DOTALL)
+    
+    # Fix 2: Remove trailing commas before } or ]
+    repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
+    
+    # Fix 3: Replace single quotes with double quotes (carefully)
+    # Only replace single quotes that appear to be delimiters
+    repaired = re.sub(r"(?<!\\)'([^']*?)'(?=\s*[:}\],])", r'"\1"', repaired)
+    
+    # Fix 4: Add quotes to unquoted keys
+    repaired = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', repaired)
+    
+    # Fix 5: Fix common escape sequence issues
+    repaired = repaired.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+    
+    # Fix 6: Handle newlines in string values by escaping them
+    # This is a more aggressive fix for multiline strings
+    def escape_newlines_in_strings(match):
+        content = match.group(1)
+        # Escape unescaped newlines
+        content = re.sub(r'(?<!\\)\n', r'\\n', content)
+        content = re.sub(r'(?<!\\)\t', r'\\t', content)
+        return '"' + content + '"'
+    
+    repaired = re.sub(r'"([^"]*(?:\n[^"]*)*)"', escape_newlines_in_strings, repaired)
+    
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError as e:
+        logger.debug(f"JSON repair failed: {e}")
+        return None
+
+
+def validate_grading_result(result: dict) -> tuple[bool, str]:
+    """Validate that a grading result has all required fields.
+    
+    Returns:
+        (is_valid, error_message)
+    """
+    required_fields = ['score', 'max_score', 'rationale']
+    missing = [f for f in required_fields if f not in result]
+    
+    if missing:
+        return False, f"Missing required fields: {missing}"
+    
+    # Validate score is numeric
+    try:
+        score = float(result['score'])
+        max_score = float(result['max_score'])
+        if score < 0 or max_score <= 0:
+            return False, "Invalid score values (score must be >= 0, max_score > 0)"
+        if score > max_score:
+            return False, f"Score {score} exceeds max_score {max_score}"
+    except (ValueError, TypeError):
+        return False, "Score and max_score must be numeric"
+    
+    # Validate rationale is non-empty string
+    if not isinstance(result['rationale'], str) or not result['rationale'].strip():
+        return False, "Rationale must be a non-empty string"
+    
+    return True, ""
+
+
+def normalize_score(score: float, max_score: float, granularity: float = 0.5) -> float:
+    """Normalize a score to the nearest valid granularity.
+    
+    Many grading guidelines use 0.5 point increments. This ensures
+    scores align with expected granularity.
+    
+    Args:
+        score: The raw score
+        max_score: The maximum possible score
+        granularity: The minimum score increment (default 0.5)
+        
+    Returns:
+        Normalized score rounded to the nearest granularity
+    """
+    if granularity <= 0:
+        return score
+    
+    # Round to nearest granularity
+    normalized = round(score / granularity) * granularity
+    
+    # Ensure within bounds
+    normalized = max(0.0, min(normalized, max_score))
+    
+    return normalized
+
+
+def compute_confidence(initial_result: dict, reflection_result: dict | None) -> float:
+    """Compute confidence score based on initial and reflection results.
+    
+    Higher confidence when:
+    - Initial and reflection scores agree
+    - Both have valid rationales
+    - Score is not at extremes (0 or max)
+    
+    Args:
+        initial_result: The initial grading result
+        reflection_result: The reflection result (if any)
+        
+    Returns:
+        Confidence score between 0.0 and 1.0
+    """
+    confidence = 0.5  # Base confidence
+    
+    # Boost for valid initial result
+    is_valid, _ = validate_grading_result(initial_result)
+    if is_valid:
+        confidence += 0.2
+    
+    # Boost for detailed rationale
+    rationale = initial_result.get('rationale', '')
+    if len(rationale) > 100:
+        confidence += 0.1
+    
+    # Check reflection agreement
+    if reflection_result:
+        initial_score = float(initial_result.get('score', 0))
+        reflected_score = float(reflection_result.get('revised_score', initial_score))
+        
+        # Agreement boosts confidence
+        if abs(initial_score - reflected_score) < 0.01:
+            confidence += 0.2
+        elif abs(initial_score - reflected_score) <= 0.5:
+            confidence += 0.1
+        else:
+            confidence -= 0.2  # Disagreement reduces confidence
+    
+    # Penalize extreme scores (often indicate over/under grading)
+    score = float(initial_result.get('score', 0))
+    max_score = float(initial_result.get('max_score', 1))
+    if max_score > 0:
+        ratio = score / max_score
+        if ratio == 0.0 or ratio == 1.0:
+            confidence -= 0.1
+    
+    return max(0.0, min(1.0, confidence))
+
+
+# Few-shot examples for IMO grading
+FEW_SHOT_EXAMPLES = """
+Example 1:
+Problem: Find all positive integers n such that n^2 + 3n + 2 is divisible by 4.
+Solution: n^2 + 3n + 2 = (n+1)(n+2). For divisibility by 4, either n+1 or n+2 must be even, and one of them must be divisible by 4. This happens when n ≡ 0 or 3 (mod 4).
+Grading Guidelines: Award 1 point for factoring, 1 point for analyzing cases, 1 point for correct answer.
+Student Answer: "I factored it as (n+1)(n+2). Since these are consecutive integers, one is even. For divisibility by 4, we need one factor divisible by 4. This happens when n=3,7,11,... or n=0,4,8,... So n ≡ 0 or 3 (mod 4)."
+Grade: {"score": 3, "max_score": 3, "rationale": "Complete solution with correct factoring, case analysis, and answer."}
+
+Example 2:
+Problem: Prove that the sum of two odd numbers is even.
+Solution: Let the odd numbers be 2k+1 and 2m+1. Their sum is 2k+1+2m+1 = 2(k+m+1), which is even.
+Grading Guidelines: Award 1 point for setting up odd number representation, 1 point for correct algebra, 1 point for conclusion.
+Student Answer: "Let two odd numbers be 2a+1 and 2b+1. Adding: 2a+1+2b+1 = 2a+2b+2 = 2(a+b+1). This is clearly divisible by 2, so it's even."
+Grade: {"score": 3, "max_score": 3, "rationale": "Correct representation, algebra, and conclusion."}
+"""
+
+
+class TaskAgent:
+    """Task agent for grading mathematical problems with chain-of-thought reasoning."""
+
+    def __init__(self, model: str = EVAL_MODEL, temperature: float = 0.0) -> None:
+        self.model = model
+        self.temperature = temperature
+        self.log_fn = logger.info
+        self.max_retries = 3
+
+    def _extract_prediction(self, msg_history: list[dict], stage: str = "initial") -> str:
+        """Extract prediction from message history with robust fallback strategies.
+        
+        Args:
+            msg_history: The message history from LLM calls
+            stage: Description of the extraction stage for logging
+            
+        Returns:
+            Extracted prediction string or "None" if extraction fails
+        """
+        try:
+            if not msg_history:
+                self.log_fn(f"[{stage}] Empty message history")
+                return "None"
+                
+            last_msg = msg_history[-1].get("text", "")
+            if not last_msg:
+                self.log_fn(f"[{stage}] Empty last message")
+                return "None"
+            
+            # Strategy 1: Extract from JSON blocks
+            extracted = _extract_jsons(last_msg)
+            if extracted:
+                result = extracted[-1]
+                self.log_fn(f"[{stage}] Extracted JSON result: {result}")
+                
+                # Validate the result first
+                is_valid, error_msg = validate_grading_result(result)
+                if is_valid:
+                    score = float(result['score'])
+                    max_score = float(result['max_score'])
+                    # Normalize score to standard granularity
+                    normalized_score = normalize_score(score, max_score, granularity=0.5)
+                    prediction = f"{normalized_score}/{max_score}"
+                    self.log_fn(f"[{stage}] Valid result with normalized score: {prediction}")
+                    return prediction
+                
+                # Try different field combinations even if validation fails partially
+                if "response" in result:
+                    prediction = result["response"]
+                    self.log_fn(f"[{stage}] Using 'response' field: {prediction}")
+                    return prediction
+                elif "final_response" in result:
+                    prediction = result["final_response"]
+                    self.log_fn(f"[{stage}] Using 'final_response' field: {prediction}")
+                    return prediction
+                elif "score" in result and "max_score" in result:
+                    score = float(result['score'])
+                    max_score = float(result['max_score'])
+                    normalized_score = normalize_score(score, max_score, granularity=0.5)
+                    prediction = f"{normalized_score}/{max_score}"
+                    self.log_fn(f"[{stage}] Using score/max_score fields (normalized): {prediction}")
+                    return prediction
+                elif "revised_score" in result and "revised_max_score" in result:
+                    score = float(result['revised_score'])
+                    max_score = float(result['revised_max_score'])
+                    normalized_score = normalize_score(score, max_score, granularity=0.5)
+                    prediction = f"{normalized_score}/{max_score}"
+                    self.log_fn(f"[{stage}] Using revised_score/revised_max_score (normalized): {prediction}")
+                    return prediction
+                else:
+                    self.log_fn(f"[{stage}] Warning: JSON missing expected fields. Keys: {list(result.keys())}")
+            
+            # Strategy 2: Regex pattern matching for score/max_score format
+            score_match = re.search(r'(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)', last_msg)
+            if score_match:
+                raw_score = float(score_match.group(1))
+                max_score = float(score_match.group(2))
+                normalized_score = normalize_score(raw_score, max_score, granularity=0.5)
+                prediction = f"{normalized_score}/{max_score}"
+                self.log_fn(f"[{stage}] Fallback regex extraction (normalized): {prediction}")
+                return prediction
+            
+            # Strategy 3: Look for standalone numbers that might be scores
+            numbers = re.findall(r'\b(\d+(?:\.\d+)?)\b', last_msg)
+            if len(numbers) >= 2:
+                # Assume first is score, second is max_score
+                raw_score = float(numbers[0])
+                max_score = float(numbers[1])
+                normalized_score = normalize_score(raw_score, max_score, granularity=0.5)
+                prediction = f"{normalized_score}/{max_score}"
+                self.log_fn(f"[{stage}] Number pair extraction (normalized): {prediction}")
+                return prediction
+            
+            self.log_fn(f"[{stage}] All extraction strategies failed")
+            return "None"
+            
+        except Exception as e:
+            self.log_fn(f"[{stage}] Error extracting prediction: {e}")
+            import traceback
+            self.log_fn(f"[{stage}] Traceback: {traceback.format_exc()}")
+            return "None"
+
+    def _grade_with_retry(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Perform initial grading with retry logic for robustness.
+        
+        Args:
+            inputs: Dictionary containing problem data
+            
+        Returns:
+            Tuple of (prediction string, message history)
+        """
+        instruction = f"""You are an expert mathematical grader for the International Mathematical Olympiad (IMO).
+
+Your task is to grade a student's answer to a mathematical problem.
+
+{FEW_SHOT_EXAMPLES}
+
+Now grade the following problem:
+
+Domain: {inputs.get('domain', 'Mathematics')}
+
+Problem:
+{inputs.get('problem', '')}
+
+Official Solution:
+{inputs.get('solution', '')}
+
+Grading Guidelines:
+{inputs.get('grading_guidelines', '')}
+
+Student Answer:
+{inputs.get('student_answer', '')}
+
+Think step by step:
+1. Analyze what the student did correctly according to the official solution
+2. Identify any errors, gaps, or missing steps
+3. Compare against the grading guidelines
+4. Determine the score and provide detailed rationale
+
+Respond in JSON format with the following schema:
+<json>
+{{
+    "thinking": "Your detailed step-by-step analysis here",
+    "score": <numerical score>,
+    "max_score": <maximum possible score>,
+    "rationale": "Detailed explanation of why this score was awarded",
+    "response": "<score>/<max_score> - <brief summary>"
+}}
+</json>"""
+
+        for attempt in range(self.max_retries):
+            try:
+                response, msg_history, info = get_response_from_llm(
+                    msg=instruction,
+                    model=self.model,
+                    temperature=self.temperature,
+                    msg_history=[],
+                )
+                
+                prediction = self._extract_prediction(msg_history, stage=f"initial_attempt_{attempt+1}")
+                
+                if prediction != "None":
+                    return prediction, msg_history
+                
+                self.log_fn(f"[grading] Attempt {attempt + 1} failed to extract valid prediction, retrying...")
+                
+            except Exception as e:
+                self.log_fn(f"[grading] Attempt {attempt + 1} error: {e}")
+                if attempt == self.max_retries - 1:
+                    raise
+        
+        return "None", []
+
+    def _reflect_on_grade(self, msg_history: list[dict], current_prediction: str) -> tuple[str, list[dict]]:
+        """Perform self-reflection on the grading with retry logic.
+        
+        Args:
+            msg_history: Previous message history
+            current_prediction: Current grade prediction
+            
+        Returns:
+            Tuple of (updated prediction, updated message history)
+        """
+        if not msg_history or len(msg_history) < 2:
+            return current_prediction, msg_history
+        
+        reflection_msg = f"""Review your grading above. Check for:
+1. Did you award points the student didn't earn?
+2. Did you miss any errors in the student's work?
+3. Is your score consistent with the grading guidelines?
+4. Would another grader agree with your assessment?
+
+Current grade: {current_prediction}
+
+If you need to revise your grade, provide the corrected JSON. If your grade is correct, confirm it.
+
+Respond in JSON format:
+<json>
+{{
+    "reflection": "Your self-review here",
+    "revised_score": <score>,
+    "revised_max_score": <max_score>,
+    "final_response": "<score>/<max_score> - <brief summary>"
+}}
+</json>"""
+        
+        for attempt in range(self.max_retries):
+            try:
+                reflection_response, updated_history, _ = get_response_from_llm(
+                    msg=reflection_msg,
+                    model=self.model,
+                    temperature=self.temperature,
+                    msg_history=msg_history,
+                )
+                
+                new_prediction = self._extract_prediction(updated_history, stage=f"reflection_attempt_{attempt+1}")
+                
+                if new_prediction != "None":
+                    return new_prediction, updated_history
+                
+                self.log_fn(f"[reflection] Attempt {attempt + 1} failed to extract valid prediction, retrying...")
+                
+            except Exception as e:
+                self.log_fn(f"[reflection] Attempt {attempt + 1} error: {e}")
+                if attempt == self.max_retries - 1:
+                    break
+        
+        # Return original prediction if reflection fails
+        return current_prediction, msg_history
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Grade a student's answer to a mathematical problem with retry logic.
+
+        Args:
+            inputs: Dictionary containing 'problem', 'solution', 'grading_guidelines',
+                   'student_answer', and optionally 'domain'
+
+        Returns:
+            Tuple of (prediction string, message history)
+        """
+        self.log_fn(f"[forward] Starting grading for problem: {inputs.get('problem', '')[:50]}...")
+        
+        # Step 1: Initial grading with retry logic
+        prediction, msg_history = self._grade_with_retry(inputs)
+        
+        if prediction == "None":
+            self.log_fn("[forward] Failed to get valid prediction after all retries")
+            return "None", msg_history
+        
+        self.log_fn(f"[forward] Initial prediction: {prediction}")
+        
+        # Step 2: Self-reflection to verify the grade
+        final_prediction, msg_history = self._reflect_on_grade(msg_history, prediction)
+        
+        # Log confidence if we have message history to analyze
+        if msg_history and len(msg_history) >= 2:
+            try:
+                last_msg = msg_history[-1].get("text", "")
+                extracted = _extract_jsons(last_msg)
+                reflection_result = extracted[-1] if extracted else None
+                
+                # Get initial result for confidence calculation
+                initial_msg = msg_history[0].get("text", "") if msg_history else ""
+                initial_extracted = _extract_jsons(initial_msg)
+                initial_result = initial_extracted[-1] if initial_extracted else {}
+                
+                confidence = compute_confidence(initial_result, reflection_result)
+                self.log_fn(f"[forward] Confidence score: {confidence:.2f}")
+            except Exception as e:
+                self.log_fn(f"[forward] Could not compute confidence: {e}")
+        
+        self.log_fn(f"[forward] Final prediction: {final_prediction}")
+        
+        return str(final_prediction), msg_history

@@ -1,0 +1,7 @@
+{
+  "model": "accounts/fireworks/routers/kimi-k2p5-turbo",
+  "agent_name": "kimi-k2p5_b",
+  "seed": 42,
+  "iterations": 40,
+  "python_version": "3.11.15"
+}

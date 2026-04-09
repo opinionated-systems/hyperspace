@@ -1,0 +1,33 @@
+{
+  "name": "hyperspace",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "moby": false
+    },
+    "ghcr.io/devcontainers/features/git-lfs:1": {}
+  },
+  "runArgs": [
+    "--network=host",
+    "--name=hyperspace"
+  ],
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+  "postCreateCommand": ".devcontainer/post_create.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "editorconfig.editorconfig",
+        "elagil.pre-commit-helper",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "tamasfe.even-better-toml"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/workspaces/hyperspace/.venv/bin/python",
+        "python.analysis.extraPaths": ["/workspaces/hyperspace"]
+      }
+    }
+  }
+}

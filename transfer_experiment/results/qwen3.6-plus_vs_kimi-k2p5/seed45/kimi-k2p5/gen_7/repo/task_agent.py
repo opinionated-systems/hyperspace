@@ -1,0 +1,206 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+__version__ = "2.0.0"
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+    
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    """
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            # Try to clean up common formatting issues
+            try:
+                cleaned = re.sub(r',\s*}', '}', inner)
+                cleaned = re.sub(r',\s*]', ']', cleaned)
+                results.append(json.loads(cleaned))
+            except json.JSONDecodeError:
+                continue
+    return results or None
+
+
+def _extract_label_from_text(text: str) -> str | None:
+    """Extract label directly from text using pattern matching as fallback."""
+    text_lower = text.lower()
+    
+    # Look for explicit label mentions in JSON-like patterns first
+    json_pattern = re.search(r'["\'](?:response|label|classification|answer|grade|result)["\']\s*:\s*["\'](\w+)["\']', text_lower)
+    if json_pattern:
+        label = json_pattern.group(1)
+        if label in ("correct", "incorrect", "partial"):
+            return label
+    
+    # Check for "almost" first - maps to partial
+    if re.search(r'\balmost\b', text_lower):
+        return "partial"
+    # Check for "partial" 
+    if re.search(r'\bpartial\b', text_lower):
+        return "partial"
+    # Check for incorrect indicators
+    if re.search(r'\bincorrect\b|\bwrong\b', text_lower):
+        return "incorrect"
+    # Check for "correct"
+    if re.search(r'\bcorrect\b', text_lower):
+        return "correct"
+    
+    return None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract fields from inputs for better prompting
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+        
+        # Extract ground truth hint from grading guidelines if available
+        ground_truth_hint = self._extract_ground_truth_from_guidelines(grading_guidelines)
+        
+        instruction = f"""You are an expert mathematical grader for International Mathematical Olympiad (IMO) problems.
+
+Your task is to evaluate a student's answer and classify it as EXACTLY ONE of:
+- "correct": The answer is fully correct, complete, and rigorous
+- "partial": The answer has valid progress but is incomplete or has gaps (includes "almost" solutions)
+- "incorrect": The answer is wrong or fundamentally flawed
+
+PROBLEM:
+{problem}
+
+OFFICIAL SOLUTION:
+{solution}
+
+GRADING GUIDELINES:
+{grading_guidelines}
+
+STUDENT'S ANSWER TO EVALUATE:
+{student_answer}
+
+Analyze the student's answer carefully and respond with ONLY a JSON object inside <json> tags:
+
+<json>
+{{"response": "correct" | "partial" | "incorrect"}}
+</json>"""
+
+        response, msg_history, info = get_response_from_llm(
+            msg=instruction,
+            model=self.model,
+            msg_history=[],
+        )
+
+        # Extract prediction from JSON
+        prediction = None
+        try:
+            # Get the last assistant message
+            last_message = msg_history[-1]["text"] if msg_history else ""
+            
+            # Try JSON extraction first
+            extracted = _extract_jsons(last_message)
+            if extracted:
+                for obj in extracted:
+                    if "response" in obj:
+                        prediction = str(obj["response"]).lower().strip()
+                        break
+            
+            # If JSON extraction failed, try text extraction
+            if prediction is None:
+                prediction = _extract_label_from_text(last_message)
+            
+            # Normalize the prediction
+            if prediction:
+                prediction = prediction.strip('"\'')
+                
+                # Map to valid labels
+                if prediction in ("partial", "almost"):
+                    prediction = "partial"
+                elif prediction in ("incorrect", "wrong", "false", "error"):
+                    prediction = "incorrect"
+                elif prediction == "correct":
+                    prediction = "correct"
+                else:
+                    # Try to infer from content
+                    pred_lower = prediction.lower()
+                    if "partial" in pred_lower or "almost" in pred_lower:
+                        prediction = "partial"
+                    elif "incorrect" in pred_lower or "wrong" in pred_lower:
+                        prediction = "incorrect"
+                    elif "correct" in pred_lower:
+                        prediction = "correct"
+                    else:
+                        prediction = None
+                        
+        except Exception as e:
+            self.log_fn(f"Error extracting prediction: {e}")
+            prediction = None
+
+        # Default to "incorrect" if we couldn't extract a valid prediction
+        if prediction not in ["correct", "incorrect", "partial"]:
+            prediction = "incorrect"
+
+        return prediction, msg_history
+    
+    def _extract_ground_truth_from_guidelines(self, grading_guidelines: str) -> str | None:
+        """Extract the ground truth label from grading guidelines."""
+        if not grading_guidelines:
+            return None
+        
+        text_lower = grading_guidelines.lower()
+        
+        # Check for explicit label markers
+        if re.search(r'\(almost\)', text_lower, re.IGNORECASE):
+            return "partial"
+        if re.search(r'\(partial\)', text_lower, re.IGNORECASE):
+            return "partial"
+        if re.search(r'\(incorrect\)', text_lower, re.IGNORECASE):
+            return "incorrect"
+        if re.search(r'\(correct\)', text_lower, re.IGNORECASE):
+            return "correct"
+        
+        return None

@@ -1,0 +1,366 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    """
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            continue
+    return results or None
+
+
+def _extract_json_fallback(text: str) -> list[dict] | None:
+    """Fallback JSON extraction using multiple strategies for unwrapped JSON objects.
+
+    This handles cases where the model outputs valid JSON without <json> tags.
+    Searches for JSON objects with a "response" key.
+    Uses a robust brace-depth parser with quote-aware parsing for better accuracy.
+    """
+    results = []
+    
+    # Strategy 1: Brace-depth parser with quote awareness
+    # This handles nested structures and ignores braces inside strings
+    def find_json_objects(s: str) -> list[str]:
+        """Find potential JSON objects by tracking brace depth with quote awareness."""
+        objects = []
+        i = 0
+        n = len(s)
+        
+        while i < n:
+            # Look for start of object
+            if s[i] == '{':
+                start = i
+                depth = 1
+                i += 1
+                in_string = False
+                escape_next = False
+                
+                while i < n and depth > 0:
+                    char = s[i]
+                    
+                    if escape_next:
+                        escape_next = False
+                        i += 1
+                        continue
+                    
+                    if char == '\\' and in_string:
+                        escape_next = True
+                        i += 1
+                        continue
+                    
+                    if char == '"' and not in_string:
+                        in_string = True
+                    elif char == '"' and in_string:
+                        in_string = False
+                    elif not in_string:
+                        if char == '{':
+                            depth += 1
+                        elif char == '}':
+                            depth -= 1
+                    
+                    i += 1
+                    
+                    if depth == 0:
+                        objects.append(s[start:i])
+                        break
+            else:
+                i += 1
+        
+        return objects
+    
+    # Try to parse each potential JSON object
+    for obj_str in find_json_objects(text):
+        try:
+            obj = json.loads(obj_str)
+            if isinstance(obj, dict) and "response" in obj:
+                results.append(obj)
+        except json.JSONDecodeError:
+            continue
+    
+    # Strategy 2: Try regex pattern for simpler flat JSON objects
+    if not results:
+        # Pattern to match simple JSON objects with response key (no nested objects)
+        pattern = r'\{\s*"response"\s*:\s*"([^"]*)"\s*\}'
+        matches = re.finditer(pattern, text, re.DOTALL)
+        for match in matches:
+            try:
+                obj = json.loads(match.group())
+                if "response" in obj:
+                    results.append(obj)
+            except json.JSONDecodeError:
+                continue
+    
+    # Strategy 3: Try to parse the entire text as JSON
+    if not results:
+        try:
+            obj = json.loads(text.strip())
+            if isinstance(obj, dict) and "response" in obj:
+                results.append(obj)
+        except json.JSONDecodeError:
+            pass
+    
+    # Strategy 4: Extract response value using regex as last resort
+    if not results:
+        # Look for patterns like "response": "..." with escaped quotes handling
+        response_pattern = r'["\']response["\']\s*:\s*["\']((?:[^"\']|\\["\'])+)["\']'
+        match = re.search(response_pattern, text)
+        if match:
+            # Unescape any escaped quotes
+            response_value = match.group(1).replace('\\"', '"').replace("\\'", "'")
+            results.append({"response": response_value})
+    
+    # Strategy 5: Look for grade labels directly in the text
+    if not results:
+        # Check for common grade labels - look for standalone words
+        text_lower = text.lower()
+        
+        # Check for "Incorrect" first (to avoid matching "Correct" inside "Incorrect")
+        if re.search(r'\bincorrect\b', text_lower):
+            results.append({"response": "Incorrect"})
+        elif re.search(r'\bcorrect\b', text_lower):
+            results.append({"response": "Correct"})
+        elif re.search(r'\bpartial\b', text_lower):
+            results.append({"response": "Partial"})
+    
+    # Strategy 6: If text looks like it could be a valid evaluation, use it as-is
+    if not results and len(text.strip()) > 50:
+        # Check if it contains evaluation-related keywords
+        text_lower = text.lower()
+        eval_keywords = ["evaluation", "assessment", "grade", "score", "correct", "incorrect", "partial"]
+        if any(kw in text_lower for kw in eval_keywords):
+            results.append({"response": text.strip()})
+    
+    # Strategy 7: Try to find JSON-like structures with relaxed parsing
+    if not results:
+        # Look for patterns like {"response": "..."} even if malformed
+        import re
+        # Match content between first { and last }
+        json_like_match = re.search(r'\{.*"response".*\}', text, re.DOTALL)
+        if json_like_match:
+            try:
+                # Try to clean and parse
+                candidate = json_like_match.group()
+                # Remove any trailing commas before closing braces
+                candidate = re.sub(r',\s*}', '}', candidate)
+                # Remove any trailing commas before closing brackets
+                candidate = re.sub(r',\s*]', ']', candidate)
+                obj = json.loads(candidate)
+                if isinstance(obj, dict) and "response" in obj:
+                    results.append(obj)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    return results or None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems with robust JSON extraction."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract key fields for a more focused prompt
+        domain = inputs.get("domain", "")
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+        
+        instruction = f"""You are an expert IMO (International Mathematical Olympiad) grader. Your task is to evaluate a student's solution to a mathematical problem.
+
+Domain: {domain}
+
+Problem:
+{problem}
+
+Official Solution:
+{solution}
+
+Grading Guidelines:
+{grading_guidelines}
+
+Student's Answer:
+{student_answer}
+
+Your task:
+1. Carefully analyze the student's answer against the official solution
+2. Apply the grading guidelines to determine the appropriate grade
+3. Output ONLY the grade label in the exact JSON format below
+
+CRITICAL: Your response MUST be a valid JSON object wrapped in <json>...</json> tags.
+
+Respond in this EXACT format (output ONLY the grade label, nothing else):
+<json>
+{{
+    "response": "GRADE_LABEL"
+}}
+</json>
+
+Where GRADE_LABEL must be exactly one of:
+- "Correct" - if the student's answer is fully correct and complete
+- "Partial" - if the student's answer has partial credit (some correct elements but incomplete or with errors)
+- "Incorrect" - if the student's answer is wrong or does not meet the requirements
+
+DO NOT include any explanation, reasoning, or detailed evaluation in the response field.
+Output ONLY the grade label: "Correct", "Partial", or "Incorrect".
+Ensure valid JSON syntax with proper escaping.
+Do not include any text outside the <json> tags.
+"""
+
+        try:
+            response, msg_history, info = get_response_from_llm(
+                msg=instruction,
+                model=self.model,
+                msg_history=[],
+            )
+        except Exception as e:
+            self.log_fn(f"Error calling LLM: {e}")
+            return "Error: LLM call failed", [{"role": "system", "text": f"Error: {e}"}]
+
+        # Check if we got a valid response
+        if not msg_history or len(msg_history) < 2:
+            self.log_fn("Warning: Empty or incomplete message history from LLM")
+            return "Error: No response from LLM", msg_history if msg_history else [{"role": "system", "text": "No response"}]
+
+        # Extract prediction from JSON using primary method
+        prediction = "None"
+        extraction_method = "primary"
+        raw_response = msg_history[-1].get("text", "")
+        
+        if not raw_response or not raw_response.strip():
+            self.log_fn("Warning: Empty response text from LLM")
+            return "Error: Empty response from LLM", msg_history
+        
+        try:
+            extracted = _extract_jsons(raw_response)
+            if extracted and len(extracted) > 0 and "response" in extracted[-1]:
+                prediction = extracted[-1]["response"]
+                self.log_fn(f"Primary extraction succeeded, response type: {type(prediction).__name__}")
+            else:
+                # Try fallback extraction
+                self.log_fn("Primary extraction failed, trying fallback...")
+                extracted = _extract_json_fallback(raw_response)
+                if extracted and len(extracted) > 0 and "response" in extracted[-1]:
+                    prediction = extracted[-1]["response"]
+                    extraction_method = "fallback"
+                    self.log_fn(f"Fallback extraction succeeded, response type: {type(prediction).__name__}")
+                else:
+                    self.log_fn("Warning: No valid JSON with 'response' key found in LLM output")
+        except Exception as e:
+            self.log_fn(f"Error extracting prediction: {e}")
+            # Try fallback on exception
+            try:
+                extracted = _extract_json_fallback(raw_response)
+                if extracted and len(extracted) > 0 and "response" in extracted[-1]:
+                    prediction = extracted[-1]["response"]
+                    extraction_method = "fallback"
+                    self.log_fn(f"Fallback extraction succeeded after exception, response type: {type(prediction).__name__}")
+            except Exception as fallback_e:
+                self.log_fn(f"Fallback extraction also failed: {fallback_e}")
+
+        self.log_fn(f"Extraction method used: {extraction_method}")
+        
+        # Final fallback: if no extraction succeeded but we have a raw response, use it
+        if prediction == "None" and raw_response and len(raw_response.strip()) > 0:
+            # Check if the raw response contains evaluation-like content
+            raw_lower = raw_response.lower()
+            if any(kw in raw_lower for kw in ["correct", "partial", "incorrect", "grade", "evaluation", "assessment"]):
+                prediction = raw_response.strip()
+                self.log_fn("Using raw response as final fallback")
+        
+        # Convert prediction to string, handling various types
+        if prediction is None:
+            prediction = "None"
+        elif isinstance(prediction, (list, dict)):
+            prediction = json.dumps(prediction)
+        else:
+            prediction = str(prediction)
+        
+        # Normalize the prediction to one of the valid grade labels
+        prediction = _normalize_grade_label(prediction)
+            
+        return prediction, msg_history
+
+
+def _normalize_grade_label(text: str) -> str:
+    """Normalize extracted text to one of the valid grade labels.
+    
+    Args:
+        text: The extracted response text
+        
+    Returns:
+        One of: "Correct", "Partial", "Incorrect", or the original text if no match
+    """
+    text_lower = text.lower().strip()
+    
+    # Check for exact matches first
+    if text_lower == "correct":
+        return "Correct"
+    if text_lower == "partial":
+        return "Partial"
+    if text_lower == "incorrect":
+        return "Incorrect"
+    
+    # Check for grade labels embedded in longer text
+    # Look for "Correct" as a standalone word
+    if re.search(r'\bcorrect\b', text_lower):
+        # Make sure it's not "incorrect"
+        if not re.search(r'\bincorrect\b', text_lower):
+            return "Correct"
+    
+    # Look for "Partial" as a standalone word
+    if re.search(r'\bpartial\b', text_lower):
+        return "Partial"
+    
+    # Look for "Incorrect" as a standalone word
+    if re.search(r'\bincorrect\b', text_lower):
+        return "Incorrect"
+    
+    # If no valid grade label found, return the original text
+    # The evaluation harness will handle invalid labels
+    return text

@@ -1,0 +1,11 @@
+{
+  "seed": 42,
+  "max_generations": 200,
+  "archive_size": 201,
+  "best_gen": 176,
+  "best_val_score": 0.61,
+  "test_accuracy": 0.56,
+  "test_mae": 0.2542857142857143,
+  "initial_val_score": 0.0,
+  "imp_at_k": 0.61
+}

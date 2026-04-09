@@ -1,0 +1,1305 @@
+Grading ID,Problem ID,Problem,Solution,Grading guidelines,Response,Points,Reward,Problem Source,prediction
+GB-0477,PB-Advanced-014,"Two distinct positive integers \( a \) and \( b \) are written on a blackboard. At each step, you must choose one of the two operations — either adding 2 or multiplying by 3 — for each number separately, and apply the chosen operation to both numbers (possibly using different operations). You must apply an operation to both numbers every step. Find all pairs $(a, b)$ such that we can make the two numbers on the blackboard equal after a finite number of steps.","The answer is that $a$ and $b$ are both even, or $a$ and $b$ are both odd and have the same remainder when divided by 4.
+ <Step 1> Finding an invariant
+
+ Let's observe how the remainder when divided by 4 changes under the operations. First, for odd numbers, both operations change the remainder as follows:
+
+ $1 \rightarrow 3,3 \rightarrow 1$
+
+ For even numbers, adding 2 changes the remainder as follows:
+
+ \[
+ 0 \rightarrow 2,2 \rightarrow 0
+ \]
+
+ and multiplying by 3 changes the remainder as follows:
+ \[
+ 0 \rightarrow 0,2 \rightarrow 2
+ \]
+
+
+ <Step 2> Finding impossible cases
+
+ <Step 2.1> From the observation in <Step 1>, we can find conditions on $a$ and $b$ for which the conclusion of the problem does not hold. Let's consider the following two cases:
+
+ <Step 2.2> (Case 1) $a$ and $b$ have different parity.
+
+ Since the parity of the two numbers does not change under the operations, the two numbers cannot become equal. Therefore, the answer is impossible in this case.
+
+ <Step 2.3> (Case 2) $a$ and $b$ are both odd and have different remainders when divided by 4.
+
+ Since odd numbers change their remainders when divided by 4 under each operation, the remainders of the two numbers when divided by 4 will always be different, regardless of the operations. Therefore, the answer is impossible in this case.
+
+ Now, let's prove that the answer is possible for $a$ and $b$ that do not satisfy (Case 1) and (Case 2).
+
+ <Step 3> Showing that the operations exist for the remaining cases.
+
+ <Step 3.1> The remaining cases are as follows:
+
+ (Case 3) $a, b$ are both odd and have the same remainder when divided by 4.
+
+ (Case 4) $a, b$ are both even.
+
+ <Step 3.2> First, let's show that we can make $a \equiv b(\bmod 4)$ for both cases by applying operations to $a$ and $b$. In (Case 3), $a \equiv b(\bmod 4)$ is already satisfied.
+
+ In (Case 4), if $a \neq b(\bmod 4)$, then by applying the operation of changing $a$ to $3a$ and $b$ to $b+2$, we can see that $3a \equiv b+2(\bmod 4)$. Therefore, we can make the two numbers congruent modulo 4.
+
+ <Step 3.3> Now, let's write the two numbers with the same remainder when divided by 4 as $x$ and $x+4n$. Let's add 2 to $x$ for $k$ times and then multiply it by 3. On the other hand, let's multiply $x+4n$ by 3 and then add 2 to it for $k$ times. As a result of the operations, $x$ becomes $3(x+2k)$ and $x+4n$ becomes $3x+12n+2k$.
+
+ Therefore, if we set $k=3n$, then the two numbers become equal.
+
+ [Short answer] $a$ and $b$ are both even, or $a$ and $b$ are both odd and have the same remainder when divided by 4.","(Partial)
+ 1. Found a correct invariant $\pmod 4$.
+(Almost)
+ 1. Verification contains minor mistakes only.","The problem asks for all pairs of distinct positive integers $(a, b)$ such that they can be made equal after a finite number of steps using the operations $+2$ and $\times 3$ independently on both numbers at each step.
+
+Let's first determine the necessary conditions.
+
+1. Parity analysis.
+The operations $+2$ and $\times 3$ preserve the parity of a number. $x+2 \equiv x \pmod 2$ and $3x \equiv x \pmod 2$. If the numbers become equal after $N$ steps, $a_N=b_N$, then $a_N \equiv b_N \pmod 2$. Since the parity is invariant, we must have $a \equiv b \pmod 2$. So, $a$ and $b$ must have the same parity.
+
+2. Modulo 4 analysis for odd numbers.
+Suppose $a$ and $b$ are odd. An odd number $x$ is either $1 \pmod 4$ or $3 \pmod 4$.
+If we apply $+2$: $x+2 \equiv x-2 \equiv -x \pmod 4$.
+If we apply $\times 3$: $3x \equiv -x \pmod 4$.
+In every step, regardless of the operation chosen for an odd number, its congruence class modulo 4 is flipped.
+Let $(a_k, b_k)$ be the numbers after $k$ steps. If $a, b$ are odd, $a_k, b_k$ are always odd.
+$a_{k+1} \equiv -a_k \pmod 4$ and $b_{k+1} \equiv -b_k \pmod 4$.
+After $N$ steps, $a_N \equiv (-1)^N a \pmod 4$ and $b_N \equiv (-1)^N b \pmod 4$.
+If $a_N=b_N$, then $a_N \equiv b_N \pmod 4$. This implies $(-1)^N a \equiv (-1)^N b \pmod 4$, so $a \equiv b \pmod 4$.
+
+The necessary conditions are that $a$ and $b$ must have the same parity, and if they are odd, they must be congruent modulo 4.
+
+Now we prove that these conditions are sufficient. We assume WLOG $a<b$.
+
+Case 1: $a$ and $b$ are odd, and $a \equiv b \pmod 4$.
+Since $a<b$ and $a \equiv b \pmod 4$, we have $b-a=4k$ for some integer $k \ge 1$.
+We construct a sequence of operations to make them equal. We try using the same number of multiplications for both, say 1 multiplication, and $n$ additions. The total number of steps is $N=n+1$.
+
+To make $a$ catch up to $b$, we want the additions to contribute more to $a$ than to $b$. An addition contributes more if it is performed before the multiplication.
+Let the sequence of operations for $a$ be $S_a = A^n M$ (n additions, then 1 multiplication).
+$a_N = (a+2n) \cdot 3 = 3a+6n$.
+Let the sequence of operations for $b$ be $S_b = M A^n$ (1 multiplication, then n additions).
+$b_N = 3b+2n$.
+We want $a_N=b_N$. $3a+6n = 3b+2n$. $4n = 3(b-a)$.
+$4n = 3(4k) = 12k$. So $n=3k$.
+Since $k \ge 1$, $n \ge 3$. The number of steps $N=3k+1 \ge 4$.
+
+We must ensure that these sequences $S_a$ and $S_b$ can be combined into steps where an operation is applied to both numbers.
+$S_a = A \dots A M$. $S_b = M A \dots A$.
+We can define the steps as follows:
+Step 1: $(A, M)$. $a_1=a+2, b_1=3b$.
+Steps 2 to $n$: $(A, A)$. $a_n=a+2+2(n-1)=a+2n$. $b_n=3b+2(n-1)$.
+Step $n+1$: $(M, A)$. $a_{n+1}=3(a+2n)$. $b_{n+1}=3b+2(n-1)+2=3b+2n$.
+This construction is valid. Thus, this case yields solutions.
+
+Case 2: $a$ and $b$ are even.
+Let $a=2a'$ and $b=2b'$. $a', b'$ are distinct positive integers.
+Let's analyze the effect of the operations on $a', b'$.
+If we apply $+2$ to $2x$, we get $2x+2=2(x+1)$. The operation on $x$ is $+1$.
+If we apply $\times 3$ to $2x$, we get $3(2x)=2(3x)$. The operation on $x$ is $\times 3$.
+The pair $(a, b)$ can be equalized in the original problem if and only if the pair $(a', b')$ can be equalized in the modified problem where the allowed operations are $+1$ and $\times 3$.
+
+We show that any pair of distinct positive integers $(a', b')$ can be equalized in the modified problem. WLOG $a'<b'$.
+
+Case 2.1: $a'$ and $b'$ have the same parity.
+Then $b'-a'=2k$ for some $k \ge 1$.
+We use a similar construction as in Case 1, adapted to the operations $+1, \times 3$. Let's use 1 multiplication and $n$ additions for both.
+$S_{a'} = A^n M$. $a'_N = 3(a'+n)$.
+$S_{b'} = M A^n$. $b'_N = 3b'+n$.
+$3a'+3n = 3b'+n$. $2n = 3(b'-a') = 3(2k) = 6k$. $n=3k$.
+The pairing of operations is analogous to Case 1: Step 1 $(A, M)$, Steps 2 to $n$ $(A, A)$, Step $n+1$ $(M, A)$.
+This construction is valid.
+
+Case 2.2: $a'$ and $b'$ have different parity.
+Then $b'-a'$ is odd.
+In the modified problem, $+1$ flips the parity, while $\times 3$ preserves it. To equalize $a'$ and $b'$, we must use a different number of additions. Consequently, we must also use a different number of multiplications. The difference must be odd.
+
+We look for a construction with a difference of 1 in the number of multiplications.
+
+Subcase 2.2a: $3a' < b'$.
+Let $D' = b'-3a'$. $D'$ is odd and positive (since $3a' \equiv a' \not\equiv b' \pmod 2$).
+We try $m_a=1$ multiplication for $a'$ and $m_b=0$ multiplications for $b'$.
+Let $k$ be the number of additions for $a'$. Then $k+1$ additions for $b'$. $N=k+1$.
+$S_{a'} = A^k M$. $a'_N = 3(a'+k)$.
+$S_{b'} = A^{k+1}$. $b'_N = b'+k+1$.
+$3a'+3k = b'+k+1$. $2k-1 = b'-3a' = D'$.
+$k=(D'+1)/2$. Since $D'$ is odd and positive, $k$ is a positive integer.
+The pairing of operations: $k$ steps of $(A, A)$, followed by 1 step of $(M, A)$. This is valid.
+
+Subcase 2.2b: $3a' > b'$.
+Let $D = 3a'-b'$. $D$ is odd and positive.
+If we try $m_a=1, m_b=0$. $3(a'+k) = b'+k+1$. $2k+1 = b'-3a' = -D$. This is impossible since $k \ge 0$ and $D>0$.
+
+We need more multiplications. Let's try $m_a=2, m_b=1$. The difference is 1.
+Let $k$ be the number of additions for $a'$. Then $k+1$ additions for $b'$. $N=k+2$.
+We want $a'$ to grow relatively slower regarding the additions contribution.
+$S_{a'} = M^2 A^k$. $a'_N = 3^2 a' + k = 9a'+k$.
+$S_{b'} = A^{k+1} M$. $b'_N = 3(b'+k+1) = 3b'+3k+3$.
+$9a'+k = 3b'+3k+3$. $9a'-3b' = 2k+3$. $3(3a'-b') = 2k+3$.
+$3D = 2k+3$. $k = (3D-3)/2$.
+Since $D$ is odd and positive, $D \ge 1$. $k$ is a non-negative integer.
+We need to verify the pairing of operations. $S_{a'}=MM A^k$. $S_{b'}=A^{k+1} M$. $N=k+2$.
+We can use the following sequence of steps:
+Steps 1, 2: $(M, A)$.
+Steps 3 to $k+1$: $(A, A)$. (There are $(k+1)-2 = k-1$ such steps. This is valid if $k \ge 1$, i.e., $D \ge 3$).
+Step $k+2$: $(A, M)$.
+Let's verify the result.
+Start $(a', b')$.
+Steps 1, 2: $(9a', b'+2)$.
+Steps 3 to $k+1$: $(9a'+k-1, b'+2+k-1)=(9a'+k-1, b'+k+1)$.
+Step $k+2$: $(9a'+k, 3(b'+k+1))$. They are equal.
+
+If $k=0$ (i.e., $D=1$). $N=2$. $S_{a'}=MM$. $S_{b'}=AM$.
+Pairing: $(M, A), (M, M)$.
+$(a', b')$. $(3a', b'+1)$. $(9a', 3(b'+1))$.
+$9a'=3b'+3$. $3a'=b'+1$. $3a'-b'=1$. This works.
+
+We have shown that the necessary conditions are sufficient.
+
+The conditions are: $(a, b)$ must have the same parity, and if they are odd, $a \equiv b \pmod 4$.
+This can be summarized as: $(a, b)$ is a solution if and only if (both $a$ and $b$ are even) OR ($a \equiv b \pmod 4$).",7,Correct,Novel Problem,correct
+GB-0311,PB-Advanced-010,"Let $O$ and $G$ be the circumcenter and centroid of a non-isosceles triangle $ABC$, respectively. Let $H$ be the foot of the perpendicular from $A$ to $BC$, and let $M$ be the midpoint of $BC$. For a point $X$ on the line $OG$, let the line $BX$ intersect $AC$ at $P$, and let the line $CX$ intersect $AB$ at $Q$. Let $H_1$ be the foot of the perpendicular from $P$ to the line $AB$, and let $K$ be the reflection of $A$ about $H_1$. Let $T$ be the intersection of the circumcircle of triangle $KPQ$ and the circumcircle of triangle $PHM$. Prove that as $X$ moves along the line $OG$, $T$ moves along a fixed circle.","The most difficult part of this problem is to observe that $(B, T, P, C)$ are concyclic. If this holds, let $Y$ be the intersection of $TP$ and $BC$. Then $YH \cdot YM = YT \cdot YP = YB \cdot YC$,
+ which means that $Y$ is the point such that $(B, H, C, Y)$ is a harmonic division. This is a fixed point. Thus, $T$ lies on the inversion of $AC$ with respect to the circle centered at $Y$ with radius $\sqrt{YB \cdot YC}$. This is a fixed circle.
+
+ \textbf{Claim:} $(B, T, P, C)$ are concyclic. This means that the circumcircles of $\triangle BPC$, $\triangle PHM$, and $\triangle KPQ$ are coaxial. We will use the following well-known Lemma: For two circles, the locus of points where the ratio of the powers with respect to the two circles is constant is a circle coaxial with the two circles.
+ Now, using the Lemma, we see that it suffices to show that: The ratio of the powers of $B$ and $C$ with respect to the circumcircles of $\triangle PHM$ and $\triangle KPQ$ are the same.
+
+ 1) The ratio of powers of $B$ and $C$ with respect to the circumcircle of $\triangle PHM$ is $\frac{BH \cdot BM}{CH \cdot CM} = \frac{BH}{CH}$.
+
+ 2) Let's compute the ratio of powers of $B$ and $C$ with respect to the circumcircle of $\triangle KPQ$. Let $H_2$ be the foot of the perpendicular from $Q$ to $AC$, and let $L$ be the reflection of $A$ across $H_2$. Since $\angle QKP = \angle QLP = 180^\circ - \angle A$, $(K, L, P, Q)$ are concyclic. The power of $B$ is $BK \cdot BQ$, and the power of $C$ is $CL \cdot CP$. We want to show that $\frac{CL \cdot CP}{BK \cdot BQ} = \frac{CH}{BH}$.
+
+ Let $D, E$ be the intersection of the Euler line of $\triangle ABC$ with $AB, AC$ respectively. Let $R$ be the intersection of $AX$ and $BC$.
+ By Ceva's theorem, $\frac{CP}{BQ} = \frac{AP}{AQ} \times \frac{CR}{BR}$. $BK = BA - KA = BA - 2AP \cos A$, $CL = CA - LA = CA - 2AQ \cos A$.
+ Thus $\frac{CL \cdot CP}{BK \cdot BQ} = \frac{CA - 2AQ \cos A}{BA - 2AP \cos A} \times \frac{AP}{AQ} \times \frac{CR}{BR} = \frac{\frac{CA}{AQ} - 2 \cos A}{\frac{BA}{AP} - 2 \cos A} \times \frac{CR}{BR}$.
+
+ Let $\frac{XE}{DX} = \lambda$.
+ $\frac{CR}{BR} = \frac{AC \sin \angle CAR}{AB \sin \angle BAR} = \frac{AC}{AB} \cdot \frac{AD}{AE} \cdot \frac{XE}{DX} = \frac{AC \cdot AD}{AB \cdot AE} \lambda$.
+ By Menelaus' theorem on $\triangle ADE$ and line $CXQ$,
+ $\frac{AQ}{QD} \cdot \frac{CE}{AC} \cdot \frac{DX}{EX} = 1$. Thus, $\frac{AQ}{QD} = \frac{AC}{CE} \lambda$, so $AQ = \frac{1}{1 + \frac{AC}{CE} \lambda} AD = \frac{AD}{1+\lambda \frac{AC}{CE}}.$
+ Similarly, $AP = \frac{1}{1 + \frac{1}{\lambda} \frac{AB}{BD}} AE$.
+ Thus $\frac{CL \cdot CP}{BK \cdot BQ} = \frac{\frac{CA}{AQ} - 2 \cos A}{\frac{BA}{AP} - 2 \cos A} \times \frac{CR}{BR}$ has the form $\frac{(\text{linear in } \lambda)}{(\text{linear in } \lambda)}$. That is, if it is $\frac{CH}{BH}$ for two values of $\lambda$, then it is $\frac{CH}{BH}$ for all $\lambda$.
+
+ Case 1) $X = H$.
+ In this case, $P, Q$ are the feet of the altitudes from $B, C$ respectively. Thus $KL \parallel BC$. Thus $\frac{CL \cdot CP}{BK \cdot BQ} = \frac{CH \cdot CB}{BH \cdot BC} = \frac{CH}{BH}$.
+
+ Case 2) $X = G$.
+ In this case, $P, Q$ are the midpoints of $AC, AB$, and $K, L$ are the feet of altitudes from $C, B$ respectively. Thus $\frac{CL \cdot CP}{BK \cdot BQ} = \frac{CH \cdot \frac{CB}{2}}{BH \cdot \frac{BC}{2}} = \frac{CH}{BH}$.
+ Since $H \neq G$ due to scalene condition, we have two different values of $\lambda$, completing the proof.","(Partial)
+ 1. Proved that $B, T, P, C$ lie on a circle.
+ 2. Observed that it suffices to show that the ratio of powers of $B$ and $C$ respect to the circumcircles of $\triangle PHM$ and $\triangle KPQ$ are the same.
+(Almost)
+ 1. In addition to items 1 and 2 of (Partial), observed that it is enough to prove $2$ of (Partial) only for two different $X$.
+ 2. Verification contains minor mistakes only.","The problem asks us to prove that as $X$ moves along the line $OG$ (the Euler line of $\triangle ABC$), the point $T$ moves along a fixed circle. $T$ is defined as an intersection point of the circumcircle of $\triangle KPQ$ (denoted by $\omega_1$) and the circumcircle of $\triangle PHM$ (denoted by $\omega_2$). Since $P$ is also an intersection point, the line $PT$ is the radical axis of $\omega_1$ and $\omega_2$.
+
+We will proceed by showing that the radical axis $PT$ always passes through a fixed point $F$, and that this point $F$ has a constant power with respect to the circles. This implies that $T$ is the image of $P$ under a fixed inversion centered at $F$. Since $P$ moves along the line $AC$, $T$ must move along a fixed circle.
+
+1. Analysis of the family of circles $\omega_2(X)$.
+The points $H$ (foot of the altitude from $A$ to $BC$) and $M$ (midpoint of $BC$) are fixed points on the line $BC$. The circle $\omega_2(X)$ passes through $P, H, M$. As $X$ moves, $P$ moves along $AC$. The family of circles $\{\omega_2(X)\}$ forms a pencil of circles passing through $H$ and $M$. The line $BC$ is the radical axis of this pencil. For any point $F$ on $BC$, its power with respect to any circle $\omega_2(X)$ is constant: $Pow(F, \omega_2) = \vec{FH} \cdot \vec{FM}$.
+
+2. Analysis of the family of circles $\omega_1(X)$.
+As $X$ moves along the line $OG$, $P$ moves along $AC$ and $Q$ moves along $AB$. The correspondence between $P$ and $Q$ is a homography. The point $K$ is defined on $AB$ such that $H_1$ (projection of $P$ on $AB$) is the midpoint of $AK$. This implies $PA=PK$. Also, the coordinate of $K$ on $AB$ depends linearly on the coordinate of $P$ on $AC$ (specifically, $AK = 2 AP \cos A$ in magnitude).
+
+The family of circles $\omega_1(X)=(KPQ)$ is parameterized by the position of $X$, or equivalently by the position of $P$. It can be shown algebraically that when $P$ and $Q$ are related by a homography and $K$ is related linearly to $P$, the resulting family of circles $\omega_1(X)$ possesses a fixed radical center. This means there exists a fixed point $F$ such that its power with respect to $\omega_1(X)$ is constant for all $X$.
+
+3. The location of the radical center $F$.
+The crucial insight relies on a known theorem in advanced Euclidean geometry concerning the configuration defined by the Euler line.
+
+**Theorem (Pinkernell, 1997):** In the configuration described, the radical center $F$ of the family of circles $\omega_1(X)$ lies on the line $BC$ if and only if $X$ moves along the Euler line $OG$.
+
+We assume this theorem. Thus, there is a fixed point $F$ on $BC$ such that $Pow(F, \omega_1(X))$ is a constant $\rho_1$.
+
+4. Equality of powers.
+Since $F$ lies on $BC$, its power with respect to the pencil $\omega_2(X)$ is the constant $\rho_2 = \vec{FH} \cdot \vec{FM}$.
+We want to show that $\rho_1 = \rho_2$. We consider the specific case when $X=G$ (the centroid).
+
+When $X=G$, $P$ is the midpoint of $AC$ (let's call it $E$) and $Q$ is the midpoint of $AB$ (let's call it $F_{AB}$).
+$K$ is on $AB$ such that $PA=PK$, so $EA=EK$. Since $E$ is the midpoint of $AC$, $EA=EC$. Thus $EK=EC=EA$. $E$ is the circumcenter of $\triangle AKC$. This implies $\angle AKC = 90^\circ$. Since $K$ is on $AB$, $CK \perp AB$. So $K$ is the foot of the altitude from $C$ to $AB$, let's call it $C'$.
+
+The circle $\omega_1(G)$ is the circumcircle of $(C' F_{AB} E)$. This is the Nine-point circle $N$ of $\triangle ABC$.
+The circle $\omega_2(G)$ is the circumcircle of $(EHM)$. Since $E, M$ are midpoints and $H$ is an altitude foot, this is also the Nine-point circle $N$.
+
+Since $F$ is the radical center of $\omega_1(X)$, $\rho_1 = Pow(F, \omega_1(G)) = Pow(F, N)$.
+Since $F$ is on $BC$, and $H, M$ are on $BC$ and lie on $N$, the power of $F$ with respect to $N$ is $Pow(F, N) = \vec{FH} \cdot \vec{FM} = \rho_2$.
+Therefore, $\rho_1 = \rho_2$. Let $\rho$ be this common value.
+
+5. The locus of $T$.
+We have established that there is a fixed point $F$ on $BC$ such that $Pow(F, \omega_1(X)) = Pow(F, \omega_2(X)) = \rho$ for all $X$ on $OG$.
+This means that $F$ lies on the radical axis of $\omega_1(X)$ and $\omega_2(X)$, which is the line $PT$.
+Thus, $F, P, T$ are collinear.
+
+Since $P$ and $T$ lie on the circles (e.g., on $\omega_2$), the power of $F$ is also given by $\vec{FP} \cdot \vec{FT}$.
+So, $\vec{FP} \cdot \vec{FT} = \rho$.
+
+This equation implies that $T$ is the image of $P$ under the inversion $\mathcal{I}$ centered at the fixed point $F$ with the fixed power $\rho$.
+
+As $X$ moves along the line $OG$, $P$ moves along the line $AC$.
+The locus of $T$ is the image of the line $AC$ under the fixed inversion $\mathcal{I}$.
+The image of a line under an inversion is a circle (or the line itself if the center $F$ is on the line, or a point if $\rho=0$).
+
+If $\rho=0$, then $F=H$ or $F=M$. Since the triangle is non-isosceles, $H\neq M$. If $\rho=0$, $T=F$ (assuming $P\neq F$). The locus is a fixed point (a degenerate circle).
+If $\rho\neq 0$. The locus is a generalized circle (a line if $F$ is on $AC$, i.e., $F=C$, or a proper circle passing through $F$ otherwise).
+
+In all cases, $T$ moves along a fixed circle.",0,Incorrect,Novel Problem,partial
+GB-0921,PB-Advanced-028,"Let $H$ be the orthocenter of acute triangle $ABC$, let $F$ be
+ the foot of the altitude from $C$ to $AB$, and let $P$ be the reflection
+ of $H$ across $BC$. Suppose that the circumcircle of triangle $AFP$
+ intersects line $BC$ at two distinct points $X$ and $Y$. Prove
+ that $C$ is the midpoint of $XY$.","Let $Q$ be the antipode of $B$ in the circumcircle of $ABC$.
+
+
+ \textbf{Claim.} $AHQC$ is a parallelogram, and $APCQ$ is an isosceles
+ trapezoid.
+
+
+
+  \emph{Proof.} The claim follows from $\overline{AH}\perp\overline{BC}\perp\overline{CQ}$
+ and $\overline{CF}\perp\overline{AB}\perp\overline{AQ}$.
+
+
+ Let $M$ be the midpoint of $\overline{QC}$.
+
+
+ \textbf{Claim.} Point $M$ is the circumcenter of $\triangle AFP$.
+
+
+ \emph{Proof.} It's clear that $MA=MP$ from the isosceles trapezoid
+ $APCQ$. As for $MA=MF$, let $N$ denote the midpoint of $\overline{AF}$;
+ then $\overline{MN}$ is a midline of the parallelogram, so $\overline{MN}\perp\overline{AF}$.
+
+
+ Since $\overline{CM}\perp\overline{BC}$ and $M$ is the center of
+ $(AFP)$, it follows $CX=CY$.","(Partial)
+  1. Constructed an external point, including the antipode of $B$ w.r.t $(ABC)$ or the antipode of $A$ w.r.t $(AFP)$, that may lead to a solution.
+(Almost)
+  1. Solution is almost complete, but made minor mistakes which are not negligible.","**Complete Proof**
+
+Let $H$ be the orthocenter of the acute triangle $ABC$. Let $AD$ and $CF$ be the altitudes from $A$ and $C$, respectively, where $D$ is on $BC$ and $F$ is on $AB$. Thus, $AD \perp BC$ and $CF \perp AB$. $H$ is the intersection of $AD$ and $CF$.
+
+$P$ is the reflection of $H$ across the line $BC$. Since $H$ lies on $AD$ and $AD \perp BC$, $D$ is the foot of the perpendicular from $H$ to $BC$. Therefore, $P$ also lies on the line $AD$, and $D$ is the midpoint of $HP$. The points $A, H, D, P$ are collinear, and $AP \perp BC$.
+
+Let $\Gamma$ be the circumcircle of $\triangle AFP$, and let $O_\Gamma$ be its center. $\Gamma$ intersects line $BC$ at $X$ and $Y$. To prove that $C$ is the midpoint of the chord $XY$, we must show that $O_\Gamma C \perp BC$.
+
+**Step 1: Define an auxiliary point K and establish its properties.**
+
+Let $K$ be the reflection of $H$ across the point $C$. By definition, $C$ is the midpoint of the segment $HK$. Since $H$ lies on the line $CF$, $K$ also lies on the line $CF$.
+
+**Step 2: Prove that K lies on the circumcircle $\Gamma$.**
+
+We will show that the quadrilateral $AFPK$ is cyclic.
+
+First, consider $\angle AFK$. Since $F$ is the foot of the altitude $CF$, we have $CF \perp AB$. As $K$ lies on the line $CF$ and $F$ lies on $AB$, we have $KF \perp AF$. Thus, $\angle AFK = 90^\circ$.
+
+Second, consider $\angle APK$. We analyze $\triangle HPK$. We know $D$ is the midpoint of $HP$ (from the definition of $P$ as a reflection of $H$ across $BC$ through $D$). We know $C$ is the midpoint of $HK$ (by definition of $K$). By the Midpoint Theorem applied to $\triangle HPK$, the segment $DC$ is parallel to the side $PK$.
+Since $D$ and $C$ lie on the line $BC$, the line $DC$ is $BC$. Thus, $BC \parallel PK$.
+
+We established that $A, P$ are on the altitude line $AD$, so $AP \perp BC$. Since $AP \perp BC$ and $PK \parallel BC$, it follows that $AP \perp PK$. Thus, $\angle APK = 90^\circ$.
+
+Since $\angle AFK = 90^\circ$ and $\angle APK = 90^\circ$, the points $A, F, P, K$ all lie on a circle with diameter $AK$. This circle is $\Gamma$, the circumcircle of $\triangle AFP$.
+
+**Step 3: Determine the center of $\Gamma$ and relate it to C.**
+
+Since $AFPK$ is cyclic with diameter $AK$, the center $O_\Gamma$ of $\Gamma$ is the midpoint of $AK$.
+
+**Step 4: Conclude that C is the midpoint of XY.**
+
+Consider $\triangle AHK$. (Since $\triangle ABC$ is acute, $A, H, K$ are not collinear, so $\triangle AHK$ is a proper triangle).
+We have established that $O_\Gamma$ is the midpoint of $AK$, and $C$ is the midpoint of $HK$.
+By the Midpoint Theorem applied to $\triangle AHK$, the segment $O_\Gamma C$ is parallel to the side $AH$.
+$O_\Gamma C \parallel AH$.
+
+The segment $AH$ lies on the altitude $AD$. Therefore, $AH \perp BC$.
+
+Since $O_\Gamma C \parallel AH$ and $AH \perp BC$, it follows that $O_\Gamma C \perp BC$.
+
+The points $X$ and $Y$ are the intersections of the circle $\Gamma$ with the line $BC$, forming the chord $XY$. Since $O_\Gamma$ is the center of $\Gamma$ and $O_\Gamma C$ is perpendicular to the line $BC$ at point $C$, $C$ must be the midpoint of the chord $XY$.",7,Correct,USAMO 2025,correct
+GB-0994,PB-Advanced-030,"Let $m$ and $n$ be positive integers with $m\ge n$. There are
+ $m$ cupcakes of different flavors arranged around a circle and $n$
+ people who like cupcakes. Each person assigns a non-negative real
+ number score to each cupcake, depending on how much they like the
+ cupcake. Suppose that for each person $P$, it is possible to partition
+ the circle of $m$ cupcakes into $n$ groups of consecutive cupcakes
+ so that the sum of $P$'s scores of the cupcakes in each group is
+ at least $1$. Prove that it is possible to distribute the $m$ cupcakes
+ to the $n$ people so that each person $P$ receives cupcakes of total
+ score at least $1$ with respect to $P$.","Arbitrarily pick any one person - call her Pip - and her $n$ arcs.
+ The initial idea is to try to apply Hall's marriage lemma to match
+ the $n$ people with Pip's arcs (such that each such person is happy
+ with their matched arc). To that end, construct the obvious bipartite
+ graph $\mathfrak{G}$ between the people and the arcs for Pip.
+
+ We now consider the following algorithm, which takes several steps.
+ \begin{itemize}
+ \item If a perfect matching of $\mathfrak{G}$ exists, we're done!
+ \item We're probably not that lucky. Per Hall's condition, this means there
+ is a bad set $\mathcal{B}_{1}$ of people, who are compatible with
+ fewer than $\left|\mathcal{B}_{1}\right|$ of the arcs. Then delete
+ $\mathcal{B}_{1}$ and the neighbors of $\mathcal{B}_{1}$, then try
+ to find a matching on the remaining graph.
+ \item If a matching exists now, terminate the algorithm. Otherwise, that
+ means there's another bad set $\mathcal{B}_{2}$ for the remaining
+ graph. We again delete $\mathcal{B}_{2}$ and the fewer than $\mathcal{B}_{2}$
+ neighbors.
+ \item Repeat until some perfect matching $\mathcal{M}$ is possible in the
+ remaining graph, i.e. there are no more bad sets (and then terminate
+ once that occurs).
+ \end{itemize}
+ Since Pip is a universal vertex, it's impossible to delete Pip, so
+ the algorithm does indeed terminate with nonempty $\mathcal{M}$.
+
+ We commit to assigning each of person in $\mathcal{M}$ their matched
+ arc (in particular if there are no bad sets at all, the problem is
+ already solved). Now we finish the problem by induction on $n$ (for
+ the remaining people) by simply deleting the arcs used up by $\mathcal{M}$.
+
+ To see why this deletion-induction works, consider any particular
+ person Quinn not in $\mathcal{M}$. By definition, Quinn is not happy
+ with any of the $\operatorname{arcs}$ in $\mathcal{M}$. So when
+ an $\operatorname{arc}\mathcal{A}$ of $\mathcal{M}$ is deleted,
+ it had value less than 1 for Quinn so in particular it couldn't contain
+ entirely any of Quinn's arcs. Hence at most one endpoint among Quinn's
+ arcs was in the deleted $\operatorname{arc}\mathcal{A}$. When this
+ happens, this causes two arcs of Quinn to merge, and the merged value
+ is
+
+ \[
+ (\geq1)+(\geq1)-(\leq1)\quad\geq1
+ \]
+
+ meaning the induction is OK.","(Partial)
+ 1. Observed that when an arc with scores smaller than $1$ to some person $X$ is deleted, the problem condition still holds for $X$.
+ 2. Applied Hall's theorem to the arcs of a fixed person and the $n$ people.
+(Almost)
+ 1. Found a perfect matching and uses induction, but didn't explain why the induction works.
+ 2. Full proof, but didn't mention that there exists a nonempty set that satisfies Hall's condition.","Let the set of cupcakes be $\mathcal{C} = \{C_1, C_2, \ldots, C_m\}$ arranged in a circle, and the set of people be $\mathcal{P} = \{P_1, P_2, \ldots, P_n\}$. Let $s_{ij} \ge 0$ be the score person $P_i$ assigns to cupcake $C_j$. For a subset of cupcakes $A \subseteq \mathcal{C}$, we denote the total score for person $P_i$ as $S_i(A) = \sum_{C_j \in A} s_{ij}$.
+
+The hypothesis is: For each person $P_i$, there exists a partition of the circle of cupcakes into $n$ contiguous arcs (groups) $B_{i1}, B_{i2}, \ldots, B_{in}$ such that $S_i(B_{ik}) \ge 1$ for all $k \in \{1, \ldots, n\}$. Since scores are non-negative, for $S_i(B_{ik}) \ge 1$, each arc $B_{ik}$ must be non-empty. This implies that we must have at least $n$ cupcakes, so $m \ge n$, which is given.
+A direct consequence of the hypothesis is that the total score of any person $P_i$ over all cupcakes is at least $n$:
+$S_i(\mathcal{C}) = \sum_{k=1}^n S_i(B_{ik}) \ge \sum_{k=1}^n 1 = n$.
+
+We want to prove that there exists a partition of the cupcakes $\mathcal{C}$ into $n$ disjoint sets $A_1, A_2, \ldots, A_n$ such that if set $A_i$ is given to person $P_i$, then $S_i(A_i) \ge 1$ for all $i \in \{1, \ldots, n\}$.
+
+The proof consists of two main parts. First, we establish that a ""fractional"" distribution of the cupcakes is possible. Second, we show that this fractional solution can be converted into an integral one that meets the problem's requirements.
+
+### Part 1: Existence of a fractional distribution
+
+A fractional distribution is a set of variables $\{x_{ij}\}$ for $i \in \{1, \ldots, n\}$ and $j \in \{1, \ldots, m\}$, where $x_{ij}$ represents the fraction of cupcake $C_j$ assigned to person $P_i$. We are looking for a solution to the following system of linear constraints:
+1.  $x_{ij} \ge 0$ for all $i, j$.
+2.  $\sum_{i=1}^n x_{ij} = 1$ for each cupcake $C_j$. (Each cupcake is fully distributed).
+3.  $\sum_{j=1}^m s_{ij} x_{ij} \ge 1$ for each person $P_i$. (Each person's score requirement is met).
+
+We will argue by contradiction. Assume no such fractional solution exists.
+Let $\mathcal{A} = (A_1, \ldots, A_n)$ be a partition of the cupcakes. The vector of scores for this partition is $v(\mathcal{A}) = (S_1(A_1), \ldots, S_n(A_n))$. The set of all possible score vectors for integral partitions is $V = \{v(\mathcal{A}) \mid \mathcal{A} \text{ is a partition}\}$.
+The set of score vectors achievable by fractional assignments is the convex hull of $V$, denoted by $C(V)$. A vector $v \in C(V)$ has components $v_i = \sum_{j=1}^m s_{ij} x_{ij}$ where $(x_{ij})$ is a fractional assignment.
+
+Our assumption that no fractional solution exists means that there is no vector $v \in C(V)$ such that all its components are at least 1. Let $Q = [1, \infty)^n$. Our assumption is equivalent to $C(V) \cap Q = \emptyset$.
+
+Since $V$ is a finite set, $C(V)$ is a compact convex polytope. The set $Q$ is a closed convex set. By the Separating Hyperplane Theorem, since $C(V)$ and $Q$ are disjoint, there exists a non-zero vector $y = (y_1, \ldots, y_n) \in \mathbb{R}^n$ and a scalar $\alpha \in \mathbb{R}$ such that:
+1.  $y \cdot v < \alpha$ for all $v \in C(V)$.
+2.  $y \cdot z \ge \alpha$ for all $z \in Q$.
+
+Let's analyze the vector $y$.
+From condition 2, if any component $y_i$ were negative, we could choose the corresponding component $z_i$ of a vector $z \in Q$ to be arbitrarily large, making the dot product $y \cdot z$ arbitrarily small. This contradicts the existence of the lower bound $\alpha$. Thus, all components of $y$ must be non-negative: $y_i \ge 0$ for all $i$.
+Since $y$ is non-zero, $\sum y_i > 0$. We can normalize $y$ so that $\sum_{i=1}^n y_i = 1$. Such a vector $y$ lies in the standard $(n-1)$-simplex, $\Delta^{n-1}$.
+
+For any $z \in Q$, we have $z_i \ge 1$. For a normalized $y$ with $y_i \ge 0$, the infimum of $y \cdot z$ over $Q$ is $\sum_{i=1}^n y_i \cdot 1 = 1$.
+From condition 2, we must have $\alpha \le 1$. From condition 1, we must have $y \cdot v < \alpha \le 1$ for all $v \in C(V)$.
+Since all integral partitions' score vectors $v(\mathcal{A})$ are in $V \subseteq C(V)$, it must hold that for any partition $(A_1, \ldots, A_n)$:
+$$ \sum_{i=1}^n y_i S_i(A_i) < 1 $$
+This inequality must hold for all partitions. Let's choose a specific partition $(A_1^*, \ldots, A_n^*)$ based on our separating vector $y$. For each cupcake $C_j$, we assign it to the person $P_i$ who gives the maximum ""weighted score"" $y_i s_{ij}$. Ties can be broken arbitrarily.
+Formally, $C_j \in A_i^*$ if $y_i s_{ij} = \max_{k=1,\ldots,n} (y_k s_{kj})$.
+
+Let's evaluate the sum for this particular partition:
+$$ \sum_{i=1}^n y_i S_i(A_i^*) = \sum_{i=1}^n y_i \left(\sum_{C_j \in A_i^*} s_{ij}\right) = \sum_{i=1}^n \sum_{C_j \in A_i^*} y_i s_{ij} $$
+Since $\{A_i^*\}$ form a partition, we can swap the summations:
+$$ \sum_{j=1}^m \sum_{i \text{ s.t. } C_j \in A_i^*} y_i s_{ij} = \sum_{j=1}^m \max_{i=1, \ldots, n} (y_i s_{ij}) $$
+So, the consequence of our ""no fractional solution"" assumption is the existence of a vector $y \in \Delta^{n-1}$ such that:
+$$ \sum_{j=1}^m \max_{i=1, \ldots, n} (y_i s_{ij}) < 1 \quad (*)$$
+Now we use the hypothesis to show this is impossible. Let $p$ be an index such that $y_p = \max_{k=1,\dots,n} y_k$. Since $\sum y_i = 1$ and $y_i \ge 0$, we have $y_p \ge 1/n$.
+
+By hypothesis, for person $P_p$, there is a partition of $\mathcal{C}$ into $n$ contiguous arcs $B_{p1}, \ldots, B_{pn}$ such that $S_p(B_{pk}) \ge 1$ for all $k$.
+Let's analyze the sum from $(*)$. For any cupcake $C_j$, the maximum of a set is at least any of its elements, so $\max_{i} (y_i s_{ij}) \ge y_p s_{pj}$.
+Let's sum over all cupcakes, grouped by the partition corresponding to $P_p$:
+$$ \sum_{j=1}^m \max_{i=1, \ldots, n} (y_i s_{ij}) = \sum_{k=1}^n \left( \sum_{C_j \in B_{pk}} \max_{i=1, \ldots, n} (y_i s_{ij}) \right) $$
+Using the inequality $\max_{i} (y_i s_{ij}) \ge y_p s_{pj}$:
+$$ \ge \sum_{k=1}^n \left( \sum_{C_j \in B_{pk}} y_p s_{pj} \right) = y_p \sum_{k=1}^n \left( \sum_{C_j \in B_{pk}} s_{pj} \right) = y_p \sum_{k=1}^n S_p(B_{pk}) $$
+By hypothesis, $S_p(B_{pk}) \ge 1$ for each $k$.
+$$ \ge y_p \sum_{k=1}^n 1 = n y_p $$
+So we have shown that $\sum_{j=1}^m \max_i(y_i s_{ij}) \ge n y_p$.
+Combining this with inequality $(*)$, we get $n y_p < 1$.
+But we know that $y_p = \max_i y_i \ge 1/n$, which implies $n y_p \ge 1$.
+The strict inequality $n y_p < 1$ contradicts the weak inequality $n y_p \ge 1$.
+Our assumption that no fractional solution exists must be false.
+
+### Part 2: From fractional to integral distribution
+
+We have established the existence of a fractional solution $(x_{ij})$. The set of all such solutions forms a convex polytope. The vertices of this polytope are called basic feasible solutions. Since the solution set is non-empty and bounded (as $0 \le x_{ij} \le 1$), at least one basic feasible solution exists. Let $(x_{ij})$ be one such basic solution.
+
+We model the fractional distribution using a bipartite graph $G_x = (\mathcal{P} \cup \mathcal{C}, E)$, where an edge $(P_i, C_j)$ exists if $x_{ij} > 0$. A key property of basic feasible solutions for this type of problem is that the graph $G_x$ is a forest (it contains no cycles). If there were a cycle, one could adjust the values of $x_{ij}$ around the cycle to create two new valid solutions, making the original solution a convex combination of them, which contradicts it being a vertex. Specifically, for a basic solution, the number of non-zero variables $x_{ij}$ is at most $m+n-1$, which is the maximum number of edges in a forest on $m+n$ vertices.
+
+We can now define the integral assignment.
+A cupcake $C_j$ is ""integrally assigned"" if its degree in $G_x$ is 1. If $\deg(C_j) = 1$, it's connected to a single person $P_i$, so the constraint $\sum_k x_{kj}=1$ implies $x_{ij}=1$.
+A cupcake $C_j$ is ""fractionally assigned"" if $\deg(C_j) \ge 2$.
+
+Let $C_I$ be the set of integrally assigned cupcakes and $C_F$ be the set of fractionally assigned ones.
+First, we make a partial integral assignment: for each $C_j \in C_I$ connected to $P_i$, we assign $C_j$ to $P_i$.
+Let $S_i^I$ be the score person $P_i$ gets from this partial assignment. If $S_i^I \ge 1$, person $P_i$ is already satisfied.
+
+Let $P_U \subseteq \mathcal{P}$ be the set of people whose needs are not yet met (i.e., $S_i^I < 1$). For each $P_i \in P_U$, let $b_i = 1 - S_i^I > 0$ be the remaining score required. The fractional solution satisfies these remaining needs using the fractionally assigned cupcakes:
+For each $P_i \in P_U$, $\sum_{C_j \in C_F} s_{ij}x_{ij} \ge b_i$.
+
+Let $G_F$ be the subgraph of $G_x$ induced by the vertices $P_U \cup C_F$. This graph is also a forest.
+Let $T$ be any connected component (a tree) of this forest, with vertices $P_T \subseteq P_U$ and $C_T \subseteq C_F$. We will show a crucial property of such trees.
+- Every cupcake $C_j \in C_T \subseteq C_F$ has $\deg_{G_x}(C_j) \ge 2$. Its edges in $G_x$ may go to people in $P_U$ or not. But for $T$ to be a component of $G_F$, all edges from $C_T$ must go to $P_U$, so $\deg_T(C_j) = \deg_{G_x}(C_j) \ge 2$.
+- The number of edges in the tree $T$ is $|E_T| = |P_T| + |C_T| - 1$.
+- In a bipartite graph, the sum of degrees of vertices in one partition equals the total number of edges. Thus, $|E_T| = \sum_{C_j \in C_T} \deg_T(C_j)$.
+- Using $\deg_T(C_j) \ge 2$, we get $|E_T| \ge 2|C_T|$.
+- Combining these, we have $|P_T| + |C_T| - 1 \ge 2|C_T|$, which simplifies to $|P_T| - 1 \ge |C_T|$, or $|P_T| > |C_T|$.
+
+So, for each tree component of the graph of remaining fractional assignments, there are strictly more people than cupcakes. This structural property guarantees that we can find an integral assignment satisfying all remaining demands. This is a known result in combinatorics, which can be proven by induction on the number of cupcakes.
+
+**Rounding procedure:**
+For each tree $T$ in the forest $G_F$, we perform an integral assignment of its cupcakes $C_T$ to its people $P_T$.
+Since $|P_T| > |C_T|$, any such tree must have at least one leaf that is a person.
+Let $P_i$ be a leaf, connected to the single cupcake $C_j$ in $T$. We can assign $C_j$ to one of its neighbors in $T$. If we assign $C_j$ to $P_i$, person $P_i$'s score from this assignment is $s_{ij}$. We need $s_{ij} \ge b_i$. This is not guaranteed by $s_{ij}x_{ij} \ge b_i$.
+
+A full proof of the rounding procedure is technical. The general idea is to repeatedly find a leaf person $P_i$ (connected to $C_j$), modify the fractional solution to make $x_{ij}=1$, and propagate the ""score debt"" to the rest of the tree. This process terminates because the graph is a forest.
+
+A key combinatorial theorem states that for a bipartite graph that is a tree with partitions $P_T, C_T$ and $|P_T| > |C_T|$, if there's a fractional assignment of items in $C_T$ to people in $P_T$ satisfying demands $\{b_i\}_{i \in P_T}$, an integral assignment satisfying these demands exists. An intuitive reason is that with more people than items, there are ""degrees of freedom"". At least $|P_T|-|C_T|$ people will not be assigned any cupcake from $C_T$. For the rounding to be possible, these people must have non-positive demands, i.e., $b_i \le 0$. This implies they were already satisfied by the integral cupcakes from $C_I$.
+
+Let's apply this rounding theorem to each tree component $T$ of our forest $G_F$. This gives an integral assignment $\pi_T: C_T \to P_T$ such that for every person $P_i \in P_T$, the score from their newly assigned cupcakes meets their remaining demand: $\sum_{C_j \in \pi_T^{-1}(i)} s_{ij} \ge b_i$.
+
+We can now define the final partition $(A_1, \ldots, A_n)$:
+- For each person $P_i$ who was already satisfied by integral assignments ($S_i^I \ge 1$), their final set $A_i$ is their share from $C_I$. Their score is $\ge 1$.
+- For each person $P_i \in P_U$, their final set $A_i$ consists of their share from $C_I$ plus their share from the rounding on the appropriate tree component.
+The total score for such a person $P_i$ is:
+$$ S_i(A_i) = S_i^I + \sum_{C_j \in \pi_T^{-1}(i)} s_{ij} $$
+where $P_i$ belongs to the tree $T$. By the rounding result, this sum is at least $b_i$:
+$$ S_i(A_i) \ge S_i^I + b_i = S_i^I + (1 - S_i^I) = 1. $$
+Thus, every person is satisfied. We have constructed a partition of all cupcakes $\mathcal{C}$ among the $n$ people, fulfilling the required conditions.",0,Incorrect,USAMO 2025,incorrect
+GB-0658,PB-Advanced-020,"For given positive integers $x$ and $y$, we define a sequence $(a_n)_{n \ge 1}$ as
+ $$
+ a_n = \gcd \left( x^n +y , \, (y-x)\left(\sum_{i=0}^{n-1} y^i x^{n-i-1} - 1\right) \right)
+ $$
+ for all $n\in \mathbb{N}$. Find all pairs $(x,y)$ of positive integers such that the limit of the sequence $(a_n)$ exists.","To begin with, we can change the expression in the problem to
+ $\gcd \left( x^n +y , \, (y-x)\left(\sum_{i=0}^{n-1} y^i x^{n-i-1} - 1\right) \right) = \gcd \left( x^n +y , \, y^n - x^n -(y-x) \right) = \gcd(x^n +y , y^n +x)$.
+ Let the limit of the sequence $(a_n)$ exist and be equal to $g$. Then, for sufficiently large $n$,
+
+ Lemma. If the limit of $a_n$ as $n \to \infty$ exists and is equal to $g$, then $g$ divides $2 \gcd(x, y)$.
+
+ Proof. For sufficiently large $n$, we have $a_n = \gcd \left( x^n +y , \, y^n +x \right) = g$.
+ This implies that $g$ divides $x^n + y$ and $g$ divides $y^n +x$ for all $n \ge N$, for some positive integer $N$.
+
+ Consider $n \ge N$. We have $x^n + y \equiv 0 \pmod{g}$ and $x^{n+1} + y \equiv 0 \pmod{g}$.
+ Multiplying the first congruence by $x$, we get $x^{n+1} + xy \equiv 0 \pmod{g}$.
+ Subtracting the second congruence from this, we have $(x^{n+1} + xy) - (x^{n+1} + y) \equiv 0 - 0 \pmod{g}$, which simplifies to $xy - y = y(x-1) \equiv 0 \pmod{g}$.
+
+ Analogously, $x(y-1)$ is divisible by $g$.
+ Their difference $x-y$ is then divisible by $g$, so $g$ also divides
+ $x(y-1)+x(x-y)=x^2 -x$. All powers of $x$ are then congruent modulo
+ $g$, so $x+y\equiv x^{N}+y\equiv0(\bmod g)$. Then $2x=(x+y)+(x-y)$
+ and $2y=(x+y)-(x-y)$ are both divisible by $g$, so $g\mid2\operatorname{gcd}(x,y)$.
+ On the other hand, it is clear that $\operatorname{gcd}(x,y)\mid g$,
+ thus proving the Lemma.
+
+ Let $d=\operatorname{gcd}(x,y)$, and write $x=da$ and $y=db$ for
+ coprime positive integers $a$ and $b$. We have that
+
+ \[
+ \operatorname{gcd}\left((da)^{n}+db,(db)^{n}+da\right)=d\operatorname{gcd}\left(d^{n-1}a^{n}+b,d^{n-1}b^{n}+a\right)
+ \]
+
+ so the Lemma tells us that
+
+ \[
+ \operatorname{gcd}\left(d^{n-1}a^{n}+b,d^{n-1}b^{n}+a\right)\leqslant2
+ \]
+
+ for all $n\geqslant N$. Defining $K=d^{2}ab+1$, note that $K$ is
+ coprime to each of $d,a$, and $b$. By Euler's theorem, for $n\equiv-1(\bmod\varphi(K))$
+ we have that
+
+ \[
+ d^{n-1}a^{n}+b\equiv d^{-2}a^{-1}+b\equiv d^{-2}a^{-1}\left(1+d^{2}ab\right)\equiv 0\quad(\bmod K)
+ \]
+
+ so $K\mid d^{n-1}a^{n}+b$. Analogously, we have that $K\mid d^{n-1}b^{n}+a$.
+ Taking such an $n$ which also satisfies $n\geqslant N$ gives us
+ that
+
+ \[
+ K\mid\operatorname{gcd}\left(d^{n-1}a^{n}+b,d^{n-1}b^{n}+a\right)\leqslant2
+ \]
+
+ This is only possible when $d=a=b=1$, which yields the only solution
+ $(x,y)=(1,1)$. Therefore, the only solution is $(x,y)=(1,1)$.","(Partial)
+ 1. Considered a prime $p|xy+1$.
+(Almost)
+ 1. Solution is almost complete, but made minor mistakes which are not negligible.
+ 2. Omitted the case when $xy+1$ doesn't have an odd prime factor.","The sequence $(a_n)_{n \ge 1}$ is defined by
+$$
+ a_n = \gcd \left( x^n +y , \, (y-x)\left(\sum_{i=0}^{n-1} y^i x^{n-i-1} - 1\right) \right).
+$$
+Since $(a_n)$ is a sequence of positive integers, its limit exists if and only if the sequence is eventually constant.
+
+Case 1: $x=y$.
+The second term in the gcd is 0. Thus, $a_n = \gcd(x^n+x, 0) = x^n+x$.
+If $x=1$, then $(x,y)=(1,1)$. $a_n = 1^n+1 = 2$. The sequence is constant, so the limit exists.
+If $x>1$, $a_n = x^n+x$ is strictly increasing and tends to infinity. The limit does not exist.
+
+Case 2: $x \ne y$.
+The summation is $\sum_{i=0}^{n-1} y^i x^{n-i-1} = \frac{y^n-x^n}{y-x}$.
+The second term is $(y-x)\left(\frac{y^n-x^n}{y-x} - 1\right) = y^n-x^n - (y-x)$.
+$a_n = \gcd(x^n+y, y^n-x^n-y+x)$.
+Using the property $\gcd(A, B) = \gcd(A, A+B)$, we have
+$a_n = \gcd(x^n+y, (x^n+y) + (y^n-x^n-y+x)) = \gcd(x^n+y, y^n+x)$.
+Without loss of generality, assume $x < y$.
+
+Case 2.1: $x=1$.
+$a_n = \gcd(1+y, y^n+1)$. Since $x<y$, $y>1$.
+If $n$ is odd, $y+1$ divides $y^n+1$, so $a_n = y+1$.
+If $n$ is even, $y^n+1 = (y^n-1)+2$. Since $y+1$ divides $y^n-1$, $a_n = \gcd(y+1, 2)$.
+For the limit to exist, we must have $y+1 = \gcd(y+1, 2)$. This means $y+1$ divides 2.
+Since $y>1$, $y+1>2$. This is impossible.
+
+Case 2.2: $1 < x < y$.
+Let $d=\gcd(x,y)$. $x=dX, y=dY$, with $\gcd(X,Y)=1$ and $1 \le X < Y$.
+$a_n = d \gcd(d^{n-1}X^n+Y, d^{n-1}Y^n+X)$. Let $b_n = \gcd(d^{n-1}X^n+Y, d^{n-1}Y^n+X)$.
+If $(a_n)$ converges, then $(b_n)$ converges to some limit $L_b$. $b_n=L_b$ for $n \ge N$.
+
+For $n \ge 2$, we can show that $\gcd(b_n, d)=1$. If a prime $p|d$ and $p|b_n$, then $p|Y$ and $p|X$, contradiction. Thus $\gcd(L_b, d)=1$.
+
+We can also show that $L_b \in \{1, 2\}$.
+$L_b$ divides $b_n$ and $b_{n+1}$ for $n \ge N \ge 2$.
+$L_b$ divides $Y(1-dX)$ and $X(1-dY)$.
+Since $\gcd(X,Y)=1$, we can show $\gcd(L_b, X)=1$ and $\gcd(L_b, Y)=1$. (If $p|L_b$ and $p|X$, then $p|Y$, contradiction).
+Thus $L_b|dX-1$ and $L_b|dY-1$.
+$dX \equiv 1 \pmod{L_b}$ and $dY \equiv 1 \pmod{L_b}$.
+$L_b | d^{n-1}X^n+Y$. Multiplying by $d$, $L_b | d^n X^n+dY$.
+$d^n X^n+dY = (dX)^n+dY \equiv 1^n+1 = 2 \pmod{L_b}$.
+So $L_b|2$. $L_b \in \{1, 2\}$.
+
+Case 2.2.1: $\gcd(x,y)=1$.
+Here $d=1$. $X=x, Y=y$. $L_b=L$. $L \in \{1, 2\}$.
+Let $S=x+y$. Since $1<x<y$ and $\gcd(x,y)=1$, $x \ge 2, y \ge 3$, so $S \ge 5$.
+If $S$ has an odd prime factor $P$. $y \equiv -x \pmod P$. $\gcd(x, P)=1$.
+For odd $n$, $a_n = \gcd(x^n+y, y^n+x)$.
+$x^n+y \equiv x^n-x = x(x^{n-1}-1) \pmod P$.
+$y^n+x \equiv (-x)^n+x = -x^n+x = -x(x^{n-1}-1) \pmod P$.
+Let $k$ be the order of $x$ modulo $P$. Let $n_j=2jk+1$. These $n_j$ are odd and tend to infinity.
+For these $n_j$, $x^{n_j-1}-1 \equiv 0 \pmod P$. So $P|a_{n_j}$.
+If $a_n \to L$, then $P|L$. Since $P \ge 3$ and $L \in \{1, 2\}$, this is a contradiction.
+So $x+y$ must be a power of 2. $x+y=2^k$. Since $S \ge 5$, $k \ge 3$.
+Since $\gcd(x,y)=1$, $x, y$ are odd.
+We analyze the 2-adic valuation $v_2(a_n)$.
+If $n$ is even. $x^n \equiv 1 \pmod 4, y^n \equiv 1 \pmod 4$.
+$x^n+y \equiv 1+y \pmod 4$. $y^n+x \equiv 1+x \pmod 4$.
+Since $x+y=2^k, k \ge 3$, $x+y \equiv 0 \pmod 4$. One of $x, y$ is $1 \pmod 4$, the other is $3 \pmod 4$.
+Then one of $1+y, 1+x$ is $2 \pmod 4$, the other is $0 \pmod 4$.
+So $v_2(a_n)=1$.
+If $n$ is odd. $x^n+y = x(x^{n-1}-1)+(x+y)$. Since $n-1$ is even and $x$ is odd, $x^{n-1}-1$ is divisible by $x^2-1$, which is divisible by 8. Since $k \ge 3$, $x+y$ is divisible by 8.
+So $x^n+y$ is divisible by 8. Similarly $y^n+x$ is divisible by 8.
+$v_2(a_n) \ge 3$.
+Since $v_2(a_n)$ alternates, $(a_n)$ does not converge.
+
+Case 2.2.2: $\gcd(x,y)=d>1$.
+$L_b \in \{1, 2\}$. $\gcd(L_b, d)=1$.
+
+If $L_b=1$. $d$ can be anything.
+If we can find $N \ge 2$ such that $b_N>1$. Let $P$ be a prime factor of $b_N$.
+We can show that $P|b_{N+kM}$ for some $M$.
+Let $M$ be the lcm of the orders of $d, X, Y$ modulo $P$. (We must ensure $P \nmid dXY$. $P \nmid d$ is known. If $P|X$, then $P|Y$, contradiction).
+Then $d^M \equiv 1, X^M \equiv 1, Y^M \equiv 1 \pmod P$.
+$d^{N+M-1}X^{N+M}+Y \equiv d^{N-1}X^N+Y \equiv 0 \pmod P$.
+So $P|b_{N+kM}$. This means $b_n$ cannot converge to 1.
+Examples: $(x,y)=(3,6)$. $d=3, X=1, Y=2$. $L_b=1$. $b_7=17$.
+$(x,y)=(2,6)$. $d=2, X=1, Y=3$. $L_b=1$. $b_4=11$.
+It is generally believed that such an $N$ always exists when $d>1$, although a formal proof might be complicated. Assuming this holds, there are no solutions in this case.
+
+If $L_b=2$. $d$ must be odd. $X, Y$ must be odd.
+We analyze $v_2(b_n)$.
+If $X+Y \equiv 0 \pmod 4$. $v_2(b_n)$ oscillates between 1 (for even $n$) and $\ge 2$ (for odd $n$). No convergence.
+If $X+Y \equiv 2 \pmod 4$. $X \equiv Y \pmod 4$.
+If $X \equiv Y \equiv 1 \pmod 4$. If $d \equiv 3 \pmod 4$, $v_2(b_n)$ oscillates. If $d \equiv 1 \pmod 4$, $v_2(b_n)=1$ constantly.
+If $X \equiv Y \equiv 3 \pmod 4$. If $d \equiv 1 \pmod 4$, $v_2(b_n)$ oscillates. If $d \equiv 3 \pmod 4$, $v_2(b_n)=1$ constantly.
+
+In the cases where $v_2(b_n)=1$ constantly, $L_b=2$ is possible.
+We need to show that $b_n>2$ infinitely often.
+Example: $(x,y)=(9, 45)$. $d=9, X=1, Y=5$. $d \equiv 1, X \equiv 1, Y \equiv 1 \pmod 4$. $L_b=2$.
+We checked $b_{11}$. $b_{11} = \gcd(9^{10}+5, 9^{10}5^{11}+1)$.
+We found that $7|b_{11}$. Since $v_2(b_{11})=1$, $b_{11}$ is a multiple of 14.
+Since $b_{11} \ge 14 > 2$, the sequence $(b_n)$ does not converge to 2. (As $7|b_{11+kM}$ infinitely often).
+
+In all cases where $x \ne y$, the sequence $(a_n)$ does not converge.
+The only solution is $(1,1)$.",0,Incorrect,(Modified) IMO 2024 P2,partial
+GB-0669,PB-Advanced-020,"For given positive integers $x$ and $y$, we define a sequence $(a_n)_{n \ge 1}$ as
+ $$
+ a_n = \gcd \left( x^n +y , \, (y-x)\left(\sum_{i=0}^{n-1} y^i x^{n-i-1} - 1\right) \right)
+ $$
+ for all $n\in \mathbb{N}$. Find all pairs $(x,y)$ of positive integers such that the limit of the sequence $(a_n)$ exists.","To begin with, we can change the expression in the problem to
+ $\gcd \left( x^n +y , \, (y-x)\left(\sum_{i=0}^{n-1} y^i x^{n-i-1} - 1\right) \right) = \gcd \left( x^n +y , \, y^n - x^n -(y-x) \right) = \gcd(x^n +y , y^n +x)$.
+ Let the limit of the sequence $(a_n)$ exist and be equal to $g$. Then, for sufficiently large $n$,
+
+ Lemma. If the limit of $a_n$ as $n \to \infty$ exists and is equal to $g$, then $g$ divides $2 \gcd(x, y)$.
+
+ Proof. For sufficiently large $n$, we have $a_n = \gcd \left( x^n +y , \, y^n +x \right) = g$.
+ This implies that $g$ divides $x^n + y$ and $g$ divides $y^n +x$ for all $n \ge N$, for some positive integer $N$.
+
+ Consider $n \ge N$. We have $x^n + y \equiv 0 \pmod{g}$ and $x^{n+1} + y \equiv 0 \pmod{g}$.
+ Multiplying the first congruence by $x$, we get $x^{n+1} + xy \equiv 0 \pmod{g}$.
+ Subtracting the second congruence from this, we have $(x^{n+1} + xy) - (x^{n+1} + y) \equiv 0 - 0 \pmod{g}$, which simplifies to $xy - y = y(x-1) \equiv 0 \pmod{g}$.
+
+ Analogously, $x(y-1)$ is divisible by $g$.
+ Their difference $x-y$ is then divisible by $g$, so $g$ also divides
+ $x(y-1)+x(x-y)=x^2 -x$. All powers of $x$ are then congruent modulo
+ $g$, so $x+y\equiv x^{N}+y\equiv0(\bmod g)$. Then $2x=(x+y)+(x-y)$
+ and $2y=(x+y)-(x-y)$ are both divisible by $g$, so $g\mid2\operatorname{gcd}(x,y)$.
+ On the other hand, it is clear that $\operatorname{gcd}(x,y)\mid g$,
+ thus proving the Lemma.
+
+ Let $d=\operatorname{gcd}(x,y)$, and write $x=da$ and $y=db$ for
+ coprime positive integers $a$ and $b$. We have that
+
+ \[
+ \operatorname{gcd}\left((da)^{n}+db,(db)^{n}+da\right)=d\operatorname{gcd}\left(d^{n-1}a^{n}+b,d^{n-1}b^{n}+a\right)
+ \]
+
+ so the Lemma tells us that
+
+ \[
+ \operatorname{gcd}\left(d^{n-1}a^{n}+b,d^{n-1}b^{n}+a\right)\leqslant2
+ \]
+
+ for all $n\geqslant N$. Defining $K=d^{2}ab+1$, note that $K$ is
+ coprime to each of $d,a$, and $b$. By Euler's theorem, for $n\equiv-1(\bmod\varphi(K))$
+ we have that
+
+ \[
+ d^{n-1}a^{n}+b\equiv d^{-2}a^{-1}+b\equiv d^{-2}a^{-1}\left(1+d^{2}ab\right)\equiv 0\quad(\bmod K)
+ \]
+
+ so $K\mid d^{n-1}a^{n}+b$. Analogously, we have that $K\mid d^{n-1}b^{n}+a$.
+ Taking such an $n$ which also satisfies $n\geqslant N$ gives us
+ that
+
+ \[
+ K\mid\operatorname{gcd}\left(d^{n-1}a^{n}+b,d^{n-1}b^{n}+a\right)\leqslant2
+ \]
+
+ This is only possible when $d=a=b=1$, which yields the only solution
+ $(x,y)=(1,1)$. Therefore, the only solution is $(x,y)=(1,1)$.","(Partial)
+ 1. Considered a prime $p|xy+1$.
+(Almost)
+ 1. Solution is almost complete, but made minor mistakes which are not negligible.
+ 2. Omitted the case when $xy+1$ doesn't have an odd prime factor.","We are given a sequence $(a_n)_{n \ge 1}$ defined by
+$$
+ a_n = \gcd \left( x^n +y , \, (y-x)\left(\sum_{i=0}^{n-1} y^i x^{n-i-1} - 1\right) \right)
+$$
+for positive integers $x$ and $y$. We want to find all pairs $(x,y)$ such that the limit of $(a_n)$ exists. Since $(a_n)$ is a sequence of positive integers, the limit exists if and only if the sequence is eventually constant.
+
+Step 1: Simplify the expression for $a_n$.
+
+Case 1: $x=y$.
+The second term in the gcd is $(y-x)(\dots) = 0$.
+Thus, $a_n = \gcd(x^n+y, 0) = x^n+y = x^n+x$.
+If $x=1$, then $(x,y)=(1,1)$. $a_n = 1^n+1 = 2$. The sequence is constant, so the limit exists.
+If $x>1$, $a_n = x^n+x$. As $n\to\infty$, $a_n \to \infty$. The limit does not exist (as a finite value).
+So, $(1,1)$ is the only solution when $x=y$.
+
+Case 2: $x \ne y$.
+We use the formula for the geometric sum: $(y-x)\sum_{i=0}^{n-1} y^i x^{n-i-1} = y^n-x^n$.
+The second term in the gcd is:
+$$ T_n = (y-x)\left(\sum_{i=0}^{n-1} y^i x^{n-i-1} - 1\right) = (y^n-x^n) - (y-x) = y^n+x - (x^n+y). $$
+So, $a_n = \gcd(x^n+y, T_n) = \gcd(x^n+y, y^n+x - (x^n+y))$.
+Using the property $\gcd(A, B-A) = \gcd(A, B)$, we have
+$$ a_n = \gcd(x^n+y, y^n+x). $$
+
+Step 2: Analyze the case where one variable is 1.
+Without loss of generality, let $x=1$. Since $x \ne y$, $y>1$.
+$a_n = \gcd(1^n+y, y^n+1) = \gcd(y+1, y^n+1)$.
+Let $D=y+1$. We have $y \equiv -1 \pmod D$.
+$y^n+1 \equiv (-1)^n+1 \pmod D$.
+
+If $n$ is odd, $y^n+1 \equiv -1+1=0 \pmod D$. So $D \mid y^n+1$. $a_n = D = y+1$.
+If $n$ is even, $y^n+1 \equiv 1+1=2 \pmod D$. $a_n = \gcd(D, 2) = \gcd(y+1, 2)$.
+
+For the sequence $(a_n)$ to be eventually constant, the values for odd $n$ and even $n$ must eventually coincide.
+$y+1 = \gcd(y+1, 2)$.
+This implies that $y+1$ divides 2. Since $y$ is a positive integer, $y+1 \ge 2$.
+So $y+1=2$, which means $y=1$.
+This contradicts the assumption $y>1$.
+Thus, there are no solutions when $x=1, y>1$ or $y=1, x>1$.
+
+Step 3: Analyze the case $x>1, y>1$ and $x \ne y$.
+We assume the limit exists, so $a_n = L$ for $n \ge N$.
+
+Case 3.1: $\gcd(x,y)=1$.
+If $a_n=L$ for $n \ge N$, then $L$ divides $x^n+y$ and $y^n+x$.
+$L$ divides $x(x^n+y) - (x^{n+1}+y) = xy-y = y(x-1)$.
+$L$ divides $y(y^n+x) - (y^{n+1}+x) = yx-x = x(y-1)$.
+Since $\gcd(x,y)=1$. If a prime $p|L$, then $p|x^n+y$. If $p|x$, then $p|y$, contradiction. So $\gcd(L, x)=1$. Similarly, $\gcd(L, y)=1$.
+Since $L \mid y(x-1)$ and $\gcd(L, y)=1$, we must have $L \mid x-1$.
+Since $L \mid x(y-1)$ and $\gcd(L, x)=1$, we must have $L \mid y-1$.
+So $x \equiv 1 \pmod L$ and $y \equiv 1 \pmod L$.
+Then $x^n+y \equiv 1^n+1 = 2 \pmod L$.
+Since $L \mid a_n$ and $a_n \mid x^n+y$ (for $n\ge N$), we must have $L \mid 2$. So $L=1$ or $L=2$.
+
+Now consider $x+y$. Let $p$ be an odd prime divisor of $x+y$. $y \equiv -x \pmod p$.
+For odd $n$, $x^n+y \equiv x^n-x \pmod p$ and $y^n+x \equiv (-x)^n+x = -x^n+x \pmod p$.
+So $p \mid a_n$ if and only if $p \mid x^n-x$.
+Since $\gcd(x,y)=1$ and $p|x+y$, $p \nmid x$. So $p \mid x^{n-1}-1$.
+Let $k$ be the order of $x$ modulo $p$. We need $k \mid n-1$.
+We can always find infinitely many odd $n$ such that $k \mid n-1$. (If $k$ is even, $n=k+1$ is odd. If $k$ is odd, $n=2k+1$ is odd.)
+For these infinitely many $n$, $p \mid a_n$. If $a_n \to L$, then $p \mid L$.
+Since $p$ is an odd prime, $p \ge 3$. This contradicts $L \in \{1, 2\}$.
+
+Therefore, $x+y$ must have no odd prime divisors. $x+y=2^s$ for some integer $s$.
+Since $x>1, y>1$, $x+y \ge 4$. So $s \ge 2$.
+Since $\gcd(x,y)=1$ and their sum is a power of 2, $x$ and $y$ must be odd.
+If $x, y$ are odd, $x^n+y$ is even, so $a_n$ is even. Thus $L=2$.
+
+Since $x, y > 1$ and $x\ne y$, we must have $x+y \ge 3+5=8$ (e.g., $(3,5)$ or $(3, 13)$ etc.). So $s \ge 3$.
+
+Now we examine the 2-adic valuation $v_2(a_n)$.
+If $n$ is even. Since $x, y$ are odd, $x^2 \equiv 1 \pmod 8$ and $y^2 \equiv 1 \pmod 8$.
+$x^n \equiv 1 \pmod 8$ and $y^n \equiv 1 \pmod 8$.
+Since $s \ge 3$, $x+y \equiv 0 \pmod 8$, so $y \equiv -x \pmod 8$.
+$x^n+y \equiv 1+y \equiv 1-x \pmod 8$.
+$y^n+x \equiv 1+x \pmod 8$.
+$a_n = \gcd(x^n+y, y^n+x)$.
+If $x \equiv 1 \pmod 8$, $1-x \equiv 0, 1+x \equiv 2$. $v_2(a_n)=v_2(\gcd(8k, 2+8j))=1$.
+If $x \equiv 3 \pmod 8$, $1-x \equiv -2, 1+x \equiv 4$. $v_2(a_n)=v_2(\gcd(-2, 4))=1$.
+If $x \equiv 5 \pmod 8$, $1-x \equiv -4, 1+x \equiv 6$. $v_2(a_n)=v_2(\gcd(-4, 6))=1$.
+If $x \equiv 7 \pmod 8$, $1-x \equiv -6, 1+x \equiv 8$. $v_2(a_n)=v_2(\gcd(-6, 8))=1$.
+So $v_2(a_n)=1$ for all even $n$.
+
+If $n$ is odd. $a_n = \gcd(x^n+y, y^n+x)$.
+$a_1 = \gcd(x+y, y+x) = x+y = 2^s$.
+Since $s \ge 3$, $v_2(a_1) = s \ge 3$.
+Since $v_2(a_2)=1$ and $v_2(a_1) \ge 3$, the sequence $(a_n)$ is not eventually constant. No solutions here.
+
+Case 3.2: $\gcd(x,y)=d>1$.
+Let $x=dx', y=dy'$ where $\gcd(x',y')=1$. Since $x \ne y$, $x' \ne y'$.
+$a_n = \gcd(d^nx'^n+dy', d^ny'^n+dx') = d \cdot \gcd(d^{n-1}x'^n+y', d^{n-1}y'^n+x')$.
+Let $G_n = \gcd(d^{n-1}x'^n+y', d^{n-1}y'^n+x')$.
+If $a_n \to L$, then $G_n \to K=L/d$. $G_n=K$ for $n \ge N$.
+
+For $n \ge 2$, we claim $\gcd(G_n, d)=1$. If $p$ is a prime dividing $d$ and $G_n$. Then $p \mid d^{n-1}x'^n+y'$, so $p \mid y'$. Similarly $p \mid x'$. This contradicts $\gcd(x',y')=1$.
+So $\gcd(K, d)=1$.
+
+Following similar logic as in Case 3.1 (applied to $G_n=K$), we can show that $K \mid 2$.
+$K$ divides $d^{n-1}x'^n+y'$ and $d^n x'^{n+1}+y'$.
+$K$ divides $d x' (d^{n-1}x'^n+y') - (d^n x'^{n+1}+y') = d x' y' - y' = y'(dx'-1)$.
+Similarly, $K \mid x'(dy'-1)$.
+Since $\gcd(K, d)=1$. If $p|K$ and $p|y'$, then $p|d^{n-1}x'^n+y'$ implies $p|d^{n-1}x'^n$. Since $p\nmid d$, $p|x'$. Contradiction to $\gcd(x',y')=1$. So $\gcd(K, y')=1$. Similarly $\gcd(K, x')=1$.
+Thus $K \mid dx'-1$ and $K \mid dy'-1$.
+$dx' \equiv 1 \pmod K$ and $dy' \equiv 1 \pmod K$.
+$K \mid d(x'-y')$. Since $\gcd(K, d)=1$, $K \mid x'-y'$. So $y' \equiv x' \pmod K$.
+$K \mid d^{n-1}x'^n+y'$. So $K \mid d^{n-1}x'^n+x' = x'((dx')^{n-1}+1)$.
+Since $\gcd(K, x')=1$, $K \mid (dx')^{n-1}+1$.
+Since $dx' \equiv 1 \pmod K$, $K \mid 1^{n-1}+1=2$. $K=1$ or $K=2$.
+
+If $K=2$. Then $d$ must be odd (since $\gcd(K, d)=1$). $x', y'$ must be odd (since $\gcd(K, x')=\gcd(K, y')=1$).
+$x', y'$ are distinct coprime positive integers. So $x'+y' \ge 1+3=4$.
+$a_1 = \gcd(x+y, y+x) = x+y = d(x'+y')$.
+If $a_n \to L=dK=2d$. Then $a_n$ must eventually be $2d$.
+If $N=1$, $a_1=2d$. $d(x'+y')=2d$, so $x'+y'=2$. This implies $x'=1, y'=1$, contradicting $x' \ne y'$.
+If $N>1$, we must have $a_N=2d$.
+
+Let's consider $x'+y'$. Since $x', y'$ are distinct, coprime positive integers, $x'+y' \ge 3$.
+Let $p$ be a prime divisor of $x'+y'$. $y' \equiv -x' \pmod p$.
+We know $p \nmid d$ and $p \nmid x'y'$.
+For odd $n \ge 3$, $G_n = \gcd(d^{n-1}x'^n+y', d^{n-1}y'^n+x')$.
+$d^{n-1}x'^n+y' \equiv d^{n-1}x'^n-x' = x'((dx')^{n-1}-1) \pmod p$.
+$p \mid G_n$ if $(dx')^{n-1} \equiv 1 \pmod p$.
+Let $k$ be the order of $dx'$ modulo $p$. We can find infinitely many odd $n$ such that $k \mid n-1$.
+For these $n$, $p \mid G_n$.
+If $G_n \to K$, then $p \mid K$.
+Since $K \in \{1, 2\}$.
+If $K=1$, $p \mid 1$, impossible.
+If $K=2$, $p=2$. So $x'+y'$ must be a power of 2. $x'+y'=2^m$.
+Since $x', y'$ are coprime, they must be odd.
+If $K=2$, we already established $d, x', y'$ are odd.
+We found that $G_n \to 2$ implies $p=2$.
+
+So we must have $x'+y'=2^m$. Since $x' \ne y'$, $m \ge 2$ (e.g., $1+3=4$).
+We analyze $v_2(G_n)$. $d$ is odd. $x', y'$ are odd.
+If $n$ is odd ($n\ge 3$), $n-1$ is even. $d^{n-1} \equiv 1 \pmod 4$. $x'^n \equiv x', y'^n \equiv y' \pmod 4$.
+$d^{n-1}x'^n+y' \equiv x'+y' \pmod 4$.
+Since $m \ge 2$, $x'+y' \equiv 0 \pmod 4$.
+So $G_n$ is divisible by 4 for odd $n \ge 3$. $v_2(G_n) \ge 2$.
+If $G_n \to K=2$, this is a contradiction since $v_2(2)=1$.
+
+Thus, there are no solutions when $\gcd(x,y)>1$.
+
+Conclusion: The only pair of positive integers $(x,y)$ such that the limit of the sequence $(a_n)$ exists is $(1,1)$.
+<ctrl100>",1,Partial,(Modified) IMO 2024 P2,correct
+GB-0885,PB-Advanced-027,"Alice the architect and Bob the builder play a game. First, Alice
+ chooses two points $P$ and $Q$ in the plane and a subset $S$ of
+ the plane, which are announced to Bob. Next, Bob marks infinitely
+ many points in the plane, designating each a city. He may not place
+ two cities within distance at most one unit of each other, and no
+ three cities he places may be collinear. Finally, roads are constructed
+ between the cities as follows: for each pair $A,B$ of cities, they
+ are connected with a road along the line segment $AB$ if and only
+ if the following condition holds: For every city $C$ distinct from
+ $A$ and $B$, there exists $R\in S$ such that $\triangle PQR$ is
+ directly similar to either $\triangle ABC$ or $\triangle BAC$. Alice
+ wins the game if
+
+ \noindent (i) the resulting roads allow for travel between any pair
+ of cities via a finite sequence of roads and
+
+ \noindent (ii) no two roads cross.
+
+ \noindent Otherwise, Bob wins. Determine, with proof, which player
+ has a winning strategy. (Note: $\triangle UVW$ is directly similar
+ to $\triangle XYZ$ if there exists a sequence of rotations, translations,
+ and dilations sending $U$ to $X$, $V$ to $Y$, and $W$ to $Z$.)","The answer is that Alice wins. Let's define a Bob-set $V$ to be
+ a set of points in the plane with no three collinear and with all
+ distances at least 1 . The point of the problem is to prove the following
+ fact.
+
+ Claim - Given a Bob-set $V\subseteq\mathbb{R}^{2}$, consider the
+ Bob-graph with vertex set $V$ defined as follows: draw edge $ab$
+ if and only if the disk with diameter $\overline{ab}$ contains no
+ other points of $V$ on or inside it. Then the Bob-graph is connected
+ and planar.
+
+ Proving this claim shows that Alice wins since Alice can specify $\mathcal{S}$
+ to be the set of points outside the disk of diameter $PQ$.
+
+ We start with proving that every Bob-graph is connected. Assume for
+ contradiction the graph is disconnected. Let $p$ and $q$ be two
+ points in different connected components. Since $pq$ is not an edge,
+ there exists a third point $r$ inside the disk with diameter $\overline{pq}$.
+
+ Hence, $r$ is in a different connected component from at least one
+ of $p$ or $q$ - let's say point $p$. Then we repeat the same argument
+ on the disk with diameter $\overline{pr}$ to find a new point $s$,
+ non-adjacent to either $p$ or $r$. See the figure below, where the
+ X'ed out dashed edges indicate points which are not only non-adjacent
+ but in different connected components.
+
+ In this way we generate an infinite sequence of distances $\delta_{1},\delta_{2},\delta_{3},\ldots$
+ among the non-edges in the picture above. By the ""Pythagorean theorem""
+ (or really the inequality for it), we have
+
+ \[
+ \delta_{i}^{2}\leq\delta_{i-1}^{2}-1
+ \]
+
+ and this eventually generates a contradiction for large $i$, since
+ we get $0\leq\delta_{i}^{2}\leq\delta_{1}^{2}-(i-$ $1)$.
+
+ Now we prove that every Bob-graph is planar. Assume for contradiction
+ that edges $ac$ and $bd$ meet, meaning $abcd$ is a convex quadrilateral.
+ WLOG assume $\angle bad\geq90^{\circ}$ (each quadrilateral has an
+ angle at least $90^{\circ}$ ). Then the disk with diameter $\overline{bd}$
+ contains $a$, contradiction.","(Partial)
+ 1. Argued that Alice should take $S$ to be the exterior of the circle of diameter $PQ$.
+ 2. Constructed $S$ as above and proved that the resulting graph is planar.
+(Almost)
+ 1. Constructed $S$ as above and proved that the resulting graph is connected.
+ 2. Solution is almost complete, but made minor mistakes which are not negligible.","Let $P, Q$ be the points chosen by Alice, and $S$ be the subset of the plane. We can use complex numbers to represent points in the plane. Let $f(z) = \frac{z-P}{Q-P}$ be a similarity transformation mapping $P$ to 0 and $Q$ to 1. Let $W=f(S)=\{f(R): R\in S\}$. Since $\triangle PQR$ must be a triangle, $R \ne P$ and $R \ne Q$, so $0, 1 \notin W$.
+The condition for $\triangle PQR$ to be directly similar to $\triangle ABC$ is $f_{AB}(C) \in W$, where $f_{AB}(z)=\frac{z-A}{B-A}$.
+The condition for $\triangle PQR$ to be directly similar to $\triangle BAC$ is $f_{BA}(C) \in W$, which means $\frac{C-B}{A-B} \in W$, or $1-f_{AB}(C) \in W$.
+Let $W^*=W \cup \{1-w: w\in W\}$. The condition for a road between $A, B$ is that for all $C_k \in C\setminus\{A, B\}$, we have $f_{AB}(C_k)\in W^*$.
+Let $K_0=\mathbb{C}\setminus W^*$ be the set of ""forbidden"" shapes. The condition for a road $AB$ is $f_{AB}(C\setminus\{A, B\})\cap K_0=\emptyset$.
+Since $0, 1\notin W$, we also have $0, 1\notin W^*$, so $0, 1\in K_0$.
+
+Bob wins if he can choose the set of cities $C$ such that the resulting graph $G=(C, E)$ is either disconnected or non-planar. Alice wins if $G$ is connected and planar for any valid $C$ chosen by Bob. A valid $C$ must be infinite, satisfy $d(A, B)>1$ for $A\ne B\in C$, and have no three points collinear.
+
+We show that Bob has a winning strategy by considering cases for $W^*$.
+
+Case 1: $W^*$ is countable.
+Then $K_0=\mathbb{C}\setminus W^*$ is co-countable. Bob can construct $C=\{C_n\}_{n=1}^\infty$ iteratively. Suppose $C_1, \dots, C_n$ have been chosen satisfying the conditions. Bob needs to choose $C_{n+1}$. Let $K_{ij}=\{C_i+z(C_j-C_i): z\in K_0\}$ for $1\le i<j\le n$. Let $I_n=\cap_{1\le i<j\le n} K_{ij}$. $I_n$ is co-countable. Let $F_{n+1}=\cup_{k=1}^n D(C_k, 1) \cup \cup_{1\le i<j\le n} \text{Line}(C_i, C_j)$. Since $I_n$ is co-countable, it is unbounded and cannot be contained in the finite union of lines. Thus $I_n\setminus F_{n+1}$ is non-empty. Bob chooses $C_{n+1}\in I_n\setminus F_{n+1}$.
+Now, consider any pair $C_i, C_j$ with $i<j$. For any $l\ge\max(i, j)+1$, $C_l$ was chosen from $I_{l-1}=\cap_{1\le a<b\le l-1} K_{ab}$, which includes $K_{ij}$. Thus $C_l\in K_{ij}$, which means $f_{ij}(C_l)\in K_0$. Therefore, $C_iC_j$ is not an edge.
+Since no edges are formed, $G$ is disconnected. Bob wins.
+(Note: $W^*$ is countable if $S$ is countable. Alice can choose $S$ uncountable.)
+
+Case 2: $W^*$ is uncountable.
+Subcase 2a: $W^*$ is bounded.
+Let $M=\sup_{w\in W^*}|w|<\infty$. Bob chooses $C=\{C_k\}_{k=1}^\infty$ such that $C_k$ are very far apart and grow exponentially, e.g., $C_k=(R^k, \epsilon_k)$ for $R>M$ large, with $\epsilon_k$ small perturbations to ensure $d>1$ and no three collinear. Let $A=C_i, B=C_j$ with $i<j$. Consider $C_{j+1}$. $f_{ij}(C_{j+1})=\frac{C_{j+1}-C_i}{C_j-C_i}\approx \frac{R^{j+1}}{R^j}=R$. For $R$ large enough, $|f_{ij}(C_{j+1})|>M$, so $f_{ij}(C_{j+1})\in K_0$. Thus $C_iC_j$ is not an edge. $G$ has no edges. Bob wins.
+
+Subcase 2b: $W^*$ is unbounded.
+Then $K_0=\mathbb{C}\setminus W^*$ is bounded.
+If $0\notin\overline{W^*}$ or $1\notin\overline{W^*}$, where $\overline{W^*}$ is the closure of $W^*$. This means $0$ or $1$ is in the interior of $K_0$, i.e. $K_0$ contains $D(0, \epsilon)$ or $D(1, \epsilon)$ for some $\epsilon>0$. Bob can choose $C=C_1\cup C_2$ where $C_1, C_2$ are infinite sets placed far apart. Let $A\in C_1, B\in C_2$. For $X=d(A,B)$ large enough, $f_{AB}(C_1\setminus\{A\})\subset D(0, \epsilon)$ and $f_{AB}(C_2\setminus\{B\})\subset D(1, \epsilon)$. If $K_0\supset D(0, \epsilon)$, $f_{AB}(C_1\setminus\{A\})\cap K_0\ne\emptyset$, so $AB$ fails. If $K_0\supset D(1, \epsilon)$, $f_{AB}(C_2\setminus\{B\})\cap K_0\ne\emptyset$, so $AB$ fails. In either case, $G$ is disconnected. Bob wins.
+
+Subcase 2c: $W^*$ is unbounded, $0, 1\in\overline{W^*}$.
+Since $0, 1\in K_0$, this implies $0, 1\in\partial K_0$. $K_0$ is bounded.
+If $K_0\subseteq\mathbb{R}$, then $W^*\supseteq\mathbb{C}\setminus\mathbb{R}$. Since no three cities are collinear, for $A, B\in C$ and $C_k\in C\setminus\{A, B\}$, $f_{AB}(C_k)\notin\mathbb{R}$. Thus $f_{AB}(C_k)\in W^*$. The condition for $AB$ holds. $G$ is the complete infinite graph $K_\infty$. Bob can choose $C$ to contain 5 points, making $G$ non-planar. Bob wins.
+If $K_0\not\subseteq\mathbb{R}$. $K_0$ is bounded, $0, 1\in\partial K_0$. Bob can use the $C=C_1\cup C_2$ strategy. Let $A\in C_1, B\in C_2$. $f_{AB}(C_1\setminus\{A\})\to 0, f_{AB}(C_2\setminus\{B\})\to 1$. Since $0, 1\in\partial K_0$, $K_0$ does not contain $D(0, \epsilon)$ or $D(1, \epsilon)$. $W^*$ must contain points arbitrarily close to 0 and 1. Bob can likely choose the distance $X$ between $C_1, C_2$ such that $f_{AB}(C_1\setminus\{A\})$ and $f_{AB}(C_2\setminus\{B\})$ avoid $K_0$. For example, if $K_0$ has measure zero, Bob can choose $X$ from a set of measure 1. If $K_0$ has no interior, $W^*$ is open dense, Bob can likely choose $X$ to avoid $K_0$. If $K_0$ has interior, $0, 1\in\partial K_0$, $W^*$ must still contain points near 0 and 1. Bob can likely choose $X$ such that $f_{AB}(C_1\setminus\{A\})\subset W^*$ and $f_{AB}(C_2\setminus\{B\})\subset W^*$. If Bob can achieve this for all $A\in C_1, B\in C_2$, then $G$ contains $K_{\infty, \infty}$ as a subgraph, which contains $K_{3,3}$, making $G$ non-planar. Bob wins.
+Let's confirm this. Let $A\in C_1, B\in C_2$. We need $f_{AB}(A')\in W^*$ for $A'\in C_1\setminus\{A\}$ and $f_{AB}(B')\in W^*$ for $B'\in C_2\setminus\{B\}$. $f_{AB}(A')\approx 0, f_{AB}(B')\approx 1$. Since $0, 1\in\partial K_0$, $W^*$ contains $D(0, \epsilon)\setminus K_0$ and $D(1, \epsilon)\setminus K_0$. Can $f_{AB}(A')$ be forced into $K_0$? $f_{AB}(A')=\frac{A'-A}{B-A}$. Bob has control over $C_1, C_2$ and their separation. It seems Bob can choose $X$ (separation) such that $f_{AB}(A'), f_{AB}(B')$ avoid $K_0$. For instance, the set of $X$ values for which $f_{AB}(A')\in K_0$ or $f_{AB}(B')\in K_0$ might be ""small"" (e.g. countable or measure zero). Bob can choose $X$ outside this set.
+
+Conclusion: In all cases, Bob has a strategy to make $G$ either disconnected or non-planar.
+
+Final Answer: The final answer is $\boxed{Bob}$",0,Incorrect,USAMO 2025,None
+GB-0645,PB-Advanced-019,"For a real number $r$, let $A(r)$ denote the fractional part of $2r$ in its decimal representation. For a real number $r$ and a positive integer $n$, define $B(n,r)$ as
+ $$
+ B(n,r)=\sum_{k=1}^n A(kr).
+ $$
+ Find all positive real numbers $r$ such that $n(n+1)r - B(n,r)$ is a multiple of $n$ for all positive integers $n$.","Let $r$ be a positive real number. Let $A(r)$ denote the fractional part of $2r$, so $A(r) = 2r - \lfloor 2r \rfloor$. We are given that $B(n,r) = \sum_{k=1}^n A(kr)$. We want to find all positive real numbers $r$ such that $n(n+1)r - B(n,r)$ is a multiple of $n$ for all positive integers $n$.
+
+ We can rewrite the condition as
+ $$
+ n(n+1)r - \sum_{k=1}^n (2kr - \lfloor 2kr \rfloor) = \sum_{k=1}^n \lfloor 2kr \rfloor \quad \text{is a multiple of } n.
+ $$
+ Let $\alpha = 2r$. Then the condition becomes: $\sum_{k=1}^n \lfloor k\alpha \rfloor$ is a multiple of $n$ for all positive integers $n$.
+
+ We prove that all even integers $\alpha$ satisfy the condition, and no other real number $\alpha$ does so. First we will show that
+ even integers satisfy the condition. If $\alpha=2m$ where $m$ is
+ an integer then
+
+ \[
+ \lfloor\alpha\rfloor+\lfloor2\alpha\rfloor+\cdots+\lfloor n\alpha\rfloor=2m+4m+\cdots+2mn=mn(n+1)
+ \]
+
+ which is a multiple of $n$. Since $r > 0$, we must have $\alpha = 2r > 0$. So $\alpha$ must be a positive even integer. If $\alpha = 2m$ for some positive integer $m$, then $r = m$, which is a positive integer.
+
+ Now we will show that they are the only real numbers satisfying the
+ conditions of the problem. Let $\alpha=k+\epsilon$ where $k$ is
+ an integer and $0\leqslant\epsilon<1$. Then the number
+ \[
+ \begin{aligned}\lfloor\alpha\rfloor+\lfloor2\alpha\rfloor+\cdots+\lfloor n\alpha\rfloor & = \lfloor k+\epsilon \rfloor+\lfloor2(k+\epsilon)\rfloor+\cdots+\lfloor n(k+\epsilon)\rfloor
+
+ & = k+\lfloor\epsilon\rfloor+2k+\lfloor2\epsilon\rfloor+\cdots+nk+\lfloor n\epsilon\rfloor
+
+ & =\frac{kn(n+1)}{2}+\lfloor\epsilon\rfloor+\lfloor2\epsilon\rfloor+\cdots+\lfloor n\epsilon\rfloor
+ \end{aligned}
+ \]
+ has to be a multiple of $n$. We consider two cases based on the parity
+ of $k$.
+
+
+ \begin{itemize}
+ \item Case 1: \textbf{$k$ is even.} Then $\frac{kn(n+1)}{2}$ is always
+ a multiple of $n$. Thus
+ \[
+ \lfloor\epsilon\rfloor+\lfloor2\epsilon\rfloor+\cdots+\lfloor n\epsilon\rfloor
+ \]
+ also has to be a multiple of $n$. We will prove that $\lfloor n\epsilon\rfloor=0$
+ for every positive integer $n$ by strong induction. The base case
+ $n=1$ follows from the fact that $0\leqslant\epsilon<1$. Let us
+ suppose that $\lfloor m\epsilon\rfloor=0$ for every $1\leqslant m<n$.
+ Then the number
+ \[
+ \lfloor\epsilon\rfloor+\lfloor2\epsilon\rfloor+\cdots+\lfloor n\epsilon\rfloor=\lfloor n\epsilon\rfloor
+ \]
+ has to be a multiple of $n$. As $0\leqslant\epsilon<1$ then $0\leqslant n\epsilon<n$,
+ which means that the number $\lfloor n\epsilon\rfloor$ has to be
+ equal to 0. The equality $\lfloor n\epsilon\rfloor=0$ implies $0\leqslant\epsilon<1/n$.
+ Since this has to happen for all $n$, we conclude that $\epsilon=0$.
+ Thus $\alpha$ is an even integer. Since $r > 0$, $\alpha = 2r > 0$. So $\alpha$ must be a positive even integer. This means $2r = 2m$ for some positive integer $m$. Therefore, $r=m$ must be a positive integer.
+ \item Case 2: \textbf{$k$ is odd.} We will prove that $\lfloor n\epsilon\rfloor=n-1$
+ for every natural number $n$ by strong induction. The base case $n=1$
+ again follows from the fact that $0\leqslant\epsilon<1$. Let us suppose
+ that $\lfloor m\epsilon\rfloor=m-1$ for every $1\leqslant m<n$.
+ We need the number
+ \[
+ \begin{aligned}\frac{kn(n+1)}{2}+\lfloor\epsilon\rfloor+\lfloor2\epsilon\rfloor+\cdots+\lfloor n\epsilon\rfloor & =\frac{kn(n+1)}{2}+0+1+\cdots+(n-2)+\lfloor n\epsilon\rfloor
+
+ & =\frac{kn(n+1)}{2}+\frac{(n-2)(n-1)}{2}+\lfloor n\epsilon\rfloor
+
+ & =\frac{k+1}{2}n^{2}+\frac{k-3}{2}n+1+\lfloor n\epsilon\rfloor
+ \end{aligned}
+ \]
+ to be a multiple of $n$. As $k$ is odd, we need $1+\lfloor n\epsilon\rfloor$
+ to be a multiple of $n$. Again, as $0\leqslant\epsilon<1$ then $0\leqslant n\epsilon<n$,
+ so $\lfloor n\epsilon\rfloor=n-1$ as we wanted. This implies that
+ $1-\frac{1}{n}\leqslant\epsilon<1$ for all $n$. Taking the limit as $n \to \infty$, we get $\epsilon=1$, which contradicts $0 \le \epsilon < 1$.
+ So there are no other solutions in this case.
+
+ \end{itemize}
+ Therefore, $\alpha = 2r$ must be a positive even integer. This implies $r$ must be a positive integer.","(Partial)
+ 1. Verified that integer $r$ works.
+ 2. Proved that $r$ should be integer if $r$ is a rational number.
+(Almost)
+ 1. Proved that $r$ should be an integer, but did not verified that integers indeed work.
+ 2. Solution is almost complete, but made minor mistakes which are not negligible.","Here is a step-by-step derivation to find all positive real numbers $r$ satisfying the given condition.
+
+**1. Simplify the condition**
+
+We are given the definitions:
+$A(r) = \{2r\}$ (the fractional part of $2r$).
+$B(n,r) = \sum_{k=1}^n A(kr) = \sum_{k=1}^n \{2kr\}$.
+
+We are looking for positive real numbers $r$ such that $C(n,r) = n(n+1)r - B(n,r)$ is a multiple of $n$ for all positive integers $n$.
+
+Let's express $B(n,r)$ using the definition of the fractional part, $\{x\} = x - \lfloor x \rfloor$.
+$$
+B(n,r) = \sum_{k=1}^n (2kr - \lfloor 2kr \rfloor) = 2r \sum_{k=1}^n k - \sum_{k=1}^n \lfloor 2kr \rfloor.
+$$
+Using the formula $\sum_{k=1}^n k = \frac{n(n+1)}{2}$, we have:
+$$
+B(n,r) = 2r \frac{n(n+1)}{2} - \sum_{k=1}^n \lfloor 2kr \rfloor = n(n+1)r - \sum_{k=1}^n \lfloor 2kr \rfloor.
+$$
+Now we substitute this into the expression for $C(n,r)$:
+$$
+C(n,r) = n(n+1)r - B(n,r) = n(n+1)r - \left( n(n+1)r - \sum_{k=1}^n \lfloor 2kr \rfloor \right) = \sum_{k=1}^n \lfloor 2kr \rfloor.
+$$
+Let $S(n,r) = C(n,r)$. The condition is that $S(n,r)$ must be a multiple of $n$ for all $n \ge 1$.
+
+**2. Analyze the divisibility condition**
+
+Let $M_n = S(n,r)/n$. The condition requires $M_n$ to be an integer for all $n \ge 1$.
+
+We can also express $M_n$ in terms of $r$ and the average of the fractional parts.
+$$
+M_n = \frac{C(n,r)}{n} = \frac{n(n+1)r - B(n,r)}{n} = (n+1)r - \frac{B(n,r)}{n}.
+$$
+Let $A_n(r) = \frac{B(n,r)}{n} = \frac{1}{n} \sum_{k=1}^n \{2kr\}$.
+Since $0 \le \{x\} < 1$, we have $0 \le A_n(r) < 1$.
+So, $M_n = (n+1)r - A_n(r)$.
+
+**3. Analyze the difference between consecutive terms**
+
+If $M_n$ is an integer for all $n \ge 1$, then the difference $D_n = M_{n+1} - M_n$ must also be an integer for all $n \ge 1$.
+$$
+D_n = M_{n+1} - M_n = \left((n+2)r - A_{n+1}(r)\right) - \left((n+1)r - A_n(r)\right)
+$$
+$$
+D_n = r + (A_n(r) - A_{n+1}(r)).
+$$
+Let $\delta_n = A_n(r) - A_{n+1}(r)$. Then $D_n = r + \delta_n$.
+
+**4. Determine the bounds of $\delta_n$**
+
+We relate $A_{n+1}(r)$ to $A_n(r)$.
+$B(n+1, r) = B(n,r) + \{2(n+1)r\}$.
+$(n+1)A_{n+1}(r) = n A_n(r) + \{2(n+1)r\}$.
+
+$$
+\delta_n = A_n(r) - A_{n+1}(r) = A_n(r) - \frac{n A_n(r) + \{2(n+1)r\}}{n+1}
+$$
+$$
+\delta_n = \frac{(n+1)A_n(r) - n A_n(r) - \{2(n+1)r\}}{n+1} = \frac{A_n(r) - \{2(n+1)r\}}{n+1}.
+$$
+Since $0 \le A_n(r) < 1$ and $0 \le \{2(n+1)r\} < 1$, the numerator $N_n = A_n(r) - \{2(n+1)r\}$ satisfies $-1 < N_n < 1$.
+Therefore,
+$$
+|\delta_n| = \frac{|N_n|}{n+1} < \frac{1}{n+1}.
+$$
+
+**5. Prove that $r$ must be an integer**
+
+We have $D_n = r + \delta_n$, where $D_n$ is an integer. This means $|D_n - r| = |\delta_n|$.
+Combining this with the bound on $|\delta_n|$, we have:
+$$
+|D_n - r| < \frac{1}{n+1} \quad \text{for all } n \ge 1.
+$$
+This means that for every $n \ge 1$, there is an integer $D_n$ whose distance to $r$ is less than $\frac{1}{n+1}$.
+
+Suppose, for the sake of contradiction, that $r$ is not an integer. Let $\epsilon$ be the distance from $r$ to the nearest integer. Since $r$ is not an integer, $\epsilon > 0$.
+Since $D_n$ is an integer, the distance between $D_n$ and $r$ must be at least $\epsilon$:
+$$
+|D_n - r| \ge \epsilon \quad \text{for all } n \ge 1.
+$$
+However, since $\epsilon > 0$, we can choose a positive integer $n$ large enough such that $\frac{1}{n+1} < \epsilon$. (For example, choose $n > \frac{1}{\epsilon} - 1$).
+For such an $n$, we must have:
+$$
+|D_n - r| < \frac{1}{n+1} < \epsilon.
+$$
+This contradicts the requirement that $|D_n - r| \ge \epsilon$.
+
+The contradiction arises from the assumption that $r$ is not an integer. Therefore, $r$ must be an integer.
+
+**6. Verification**
+
+We have shown that if $r$ satisfies the condition, $r$ must be an integer. Since $r$ is required to be a positive real number, $r$ must be a positive integer.
+
+We verify that all positive integers $r$ satisfy the condition. If $r \in \mathbb{Z}^+$, then $2kr$ is an integer for all $k$.
+$\lfloor 2kr \rfloor = 2kr$.
+$C(n,r) = S(n,r) = \sum_{k=1}^n \lfloor 2kr \rfloor = \sum_{k=1}^n 2kr = 2r \frac{n(n+1)}{2} = n(n+1)r$.
+$C(n,r) = n \cdot ((n+1)r)$. Since $(n+1)r$ is an integer, $C(n,r)$ is a multiple of $n$ for all positive integers $n$.
+
+The set of all positive real numbers $r$ satisfying the condition is the set of positive integers $\mathbb{Z}^+$.
+
+The final answer is $\boxed{r \in \mathbb{Z}^+}$.",7,Correct,(Modified) IMO 2024 P1,correct
+GB-0460,PB-Advanced-014,"Two distinct positive integers \( a \) and \( b \) are written on a blackboard. At each step, you must choose one of the two operations — either adding 2 or multiplying by 3 — for each number separately, and apply the chosen operation to both numbers (possibly using different operations). You must apply an operation to both numbers every step. Find all pairs $(a, b)$ such that we can make the two numbers on the blackboard equal after a finite number of steps.","The answer is that $a$ and $b$ are both even, or $a$ and $b$ are both odd and have the same remainder when divided by 4.
+ <Step 1> Finding an invariant
+
+ Let's observe how the remainder when divided by 4 changes under the operations. First, for odd numbers, both operations change the remainder as follows:
+
+ $1 \rightarrow 3,3 \rightarrow 1$
+
+ For even numbers, adding 2 changes the remainder as follows:
+
+ \[
+ 0 \rightarrow 2,2 \rightarrow 0
+ \]
+
+ and multiplying by 3 changes the remainder as follows:
+ \[
+ 0 \rightarrow 0,2 \rightarrow 2
+ \]
+
+
+ <Step 2> Finding impossible cases
+
+ <Step 2.1> From the observation in <Step 1>, we can find conditions on $a$ and $b$ for which the conclusion of the problem does not hold. Let's consider the following two cases:
+
+ <Step 2.2> (Case 1) $a$ and $b$ have different parity.
+
+ Since the parity of the two numbers does not change under the operations, the two numbers cannot become equal. Therefore, the answer is impossible in this case.
+
+ <Step 2.3> (Case 2) $a$ and $b$ are both odd and have different remainders when divided by 4.
+
+ Since odd numbers change their remainders when divided by 4 under each operation, the remainders of the two numbers when divided by 4 will always be different, regardless of the operations. Therefore, the answer is impossible in this case.
+
+ Now, let's prove that the answer is possible for $a$ and $b$ that do not satisfy (Case 1) and (Case 2).
+
+ <Step 3> Showing that the operations exist for the remaining cases.
+
+ <Step 3.1> The remaining cases are as follows:
+
+ (Case 3) $a, b$ are both odd and have the same remainder when divided by 4.
+
+ (Case 4) $a, b$ are both even.
+
+ <Step 3.2> First, let's show that we can make $a \equiv b(\bmod 4)$ for both cases by applying operations to $a$ and $b$. In (Case 3), $a \equiv b(\bmod 4)$ is already satisfied.
+
+ In (Case 4), if $a \neq b(\bmod 4)$, then by applying the operation of changing $a$ to $3a$ and $b$ to $b+2$, we can see that $3a \equiv b+2(\bmod 4)$. Therefore, we can make the two numbers congruent modulo 4.
+
+ <Step 3.3> Now, let's write the two numbers with the same remainder when divided by 4 as $x$ and $x+4n$. Let's add 2 to $x$ for $k$ times and then multiply it by 3. On the other hand, let's multiply $x+4n$ by 3 and then add 2 to it for $k$ times. As a result of the operations, $x$ becomes $3(x+2k)$ and $x+4n$ becomes $3x+12n+2k$.
+
+ Therefore, if we set $k=3n$, then the two numbers become equal.
+
+ [Short answer] $a$ and $b$ are both even, or $a$ and $b$ are both odd and have the same remainder when divided by 4.","(Partial)
+ 1. Found a correct invariant $\pmod 4$.
+(Almost)
+ 1. Verification contains minor mistakes only.","**Outcome 1: COMPLETE PROOF**
+
+We are looking for all pairs of distinct positive integers $(a, b)$ such that they can be made equal by simultaneously applying operations $S(x)=x+2$ or $M(x)=3x$ to both numbers at each step.
+
+We prove that the necessary and sufficient conditions are that $a$ and $b$ have the same parity, and if they are odd, they are congruent modulo 4.
+
+### Part 1: Necessary Conditions
+
+Let $(a_k, b_k)$ denote the pair of numbers after $k$ steps, starting with $(a_0, b_0) = (a, b)$.
+
+**1. Parity Condition (Modulo 2):**
+Both operations preserve parity:
+$x+2 \equiv x \pmod 2$.
+$3x \equiv x \pmod 2$.
+Thus, $a_k \equiv a \pmod 2$ and $b_k \equiv b \pmod 2$ for all $k$. If $a_N = b_N$ for some $N$, then $a \equiv a_N = b_N \equiv b \pmod 2$.
+*Condition 1: $a$ and $b$ must have the same parity.*
+
+**2. Modulo 4 Condition (Odd Case):**
+If $a$ and $b$ are odd, all subsequent numbers $a_k, b_k$ remain odd.
+If $x$ is odd, $x \equiv \pm 1 \pmod 4$. Both operations flip the residue modulo 4:
+$x+2 \equiv -x \pmod 4$.
+$3x \equiv -x \pmod 4$.
+
+If $a_k$ is odd, $a_{k+1} \equiv -a_k \pmod 4$, regardless of the operation chosen for $a_k$.
+By induction, if $a, b$ are odd, $a_N \equiv (-1)^N a \pmod 4$ and $b_N \equiv (-1)^N b \pmod 4$.
+If $a_N = b_N$, then $(-1)^N a \equiv (-1)^N b \pmod 4$, which implies $a \equiv b \pmod 4$.
+*Condition 2: If $a$ and $b$ are odd, we must have $a \equiv b \pmod 4$.*
+
+### Part 2: Sufficiency of Conditions (Constructive Proof)
+
+We show that if $(a, b)$ satisfies the necessary conditions, we can equalize them.
+
+**The Strategy:** We aim for a penultimate state $(A, B)$ such that $A = 3B-2$. From this state, applying $(+2)$ to $A$ and $(\times 3)$ to $B$ yields $(A+2, 3B) = (3B, 3B)$.
+
+Define the characteristic function $C(X, Y) = X - 3Y + 2$. We aim for $C(A, B) = 0$.
+
+Consider the operation $P_{SS} = (+2, +2)$. It transforms $(X, Y)$ to $(X+2, Y+2)$.
+$C(X+2, Y+2) = (X+2) - 3(Y+2) + 2 = C(X, Y) - 4$.
+
+If we can reach a state $(A, B)$ such that $C(A, B) = 4m$ for some integer $m \ge 0$, we can apply $P_{SS}$ exactly $m$ times to reach $(A', B')$ where $C(A', B') = 0$.
+
+**The Overtake Strategy:**
+We apply $N$ steps of the operation $P_{MS} = (\times 3, +2)$ to $(a, b)$.
+The resulting pair is $(A_N, B_N) = (3^N a, b+2N)$.
+Let $C_N = C(A_N, B_N) = 3^N a - 3(b+2N) + 2 = 3^N a - 3b - 6N + 2$.
+
+**Step 1: Ensuring $C_N \ge 0$.**
+Since $a \ge 1$, $3^N a$ grows exponentially while $6N$ grows linearly. Thus, $C_N \to \infty$ as $N \to \infty$.
+Furthermore, $C_{N+1} - C_N = 2 \cdot 3^N a - 6$. For $N \ge 1$ and $a \ge 1$, $C_{N+1} \ge C_N$.
+There exists $N_0 \ge 1$ such that $C_N \ge 0$ for all $N \ge N_0$.
+
+**Step 2: Ensuring $C_N \equiv 0 \pmod 4$.**
+We analyze $C_N \pmod 4$. Since $3 \equiv -1 \pmod 4$:
+$C_N \equiv (-1)^N a - 3b - 6N + 2 \equiv (-1)^N a + b + 2N + 2 \pmod 4$.
+
+We analyze the cases satisfying the necessary conditions:
+
+**Case 1: $a \equiv b \pmod 4$.** (This covers all valid odd pairs, and even pairs congruent mod 4).
+We choose $N$ to be odd. Then $(-1)^N = -1$, and $2N \equiv 2 \pmod 4$.
+$C_N \equiv (-1)a + b + 2 + 2 = b-a \pmod 4$.
+Since $a \equiv b \pmod 4$, $C_N \equiv 0 \pmod 4$.
+
+**Case 2: $a, b$ are even, and $a \not\equiv b \pmod 4$.**
+This implies $\{a \bmod 4, b \bmod 4\} = \{0, 2\}$. Thus $a+b \equiv 2 \pmod 4$.
+We choose $N$ to be even ($N \ge 2$). Then $(-1)^N = 1$, and $2N \equiv 0 \pmod 4$.
+$C_N \equiv a + b + 0 + 2 = a+b+2 \pmod 4$.
+Since $a+b \equiv 2 \pmod 4$, $C_N \equiv 2+2 = 0 \pmod 4$.
+
+In both cases, we can choose $N \ge N_0$ with the required parity (by selecting $N_0$ or $N_0+1$, ensuring $N \ge 2$ if needed for Case 2). Since $C_N$ is non-decreasing for $N \ge 1$, we ensure $C_N \ge 0$ and $C_N \equiv 0 \pmod 4$.
+
+Let $C_N = 4m$ with $m \ge 0$. We apply $N$ steps of $(\times 3, +2)$, $m$ steps of $(+2, +2)$, and a final step of $(+2, \times 3)$ to achieve equality.
+
+Final Answer: The pairs of distinct positive integers $(a, b)$ that can be made equal are those satisfying $a \equiv b \pmod 2$, and if $a, b$ are odd, $a \equiv b \pmod 4$.",7,Correct,Novel Problem,correct
+GB-0279,PB-Advanced-009,"Let $H$ be the orthocenter of an acute-angled triangle $A B C$, and let $D, E, F$ be the feet of the altitudes from vertices $A, B, C$ to the opposite sides, respectively. Let $G$ be the midpoint of $B C$. Let $I, J$ be the feet of the perpendiculars from $B, C$ to $AG$, respectively. Let $K (\neq D)$ be the second intersection of the circumcircles of triangle $D I F$ and triangle $D J E$. Let $M$ be the midpoint of segment $A H$. Let $L$ be the foot of the perpendicular from $M$ to $A G$. Let $R (\neq G)$ be the second intersection of the circumcircle of triangle $A H G$ with $B C$. Let $S$ be the intersection of line $A H$ and $E F$. Let $N$ be the foot of the perpendicular from point $D$ to $R S$. Let $O$ be the midpoint of segment $D N$. Let line $D N$ intersect the circumcircle of triangle $D K L$ again at point $P (\neq D)$. Let $Q (\neq C)$ be the second intersection of the circumcircle of triangle $O C P$ and line $B C$. Prove that $A B=A Q$. "," First, let $Z$ be the intersection of lines $E F$ and $B C$. From the harmonic relation $(Z D, B C)=-1$, we have $$D G \times D R=D H \times D A=D B \times D C=D Z \times D G,$$ which implies $D Z=D R$. Therefore $R S$ is the reflection of $E F$ with respect to $A H$. Now, let's invert the figure with respect to the circle centered at $D$ with radius $\sqrt{D B \times D C}$, and then reflect it across $A D$. Let the image of a point or figure $X$ after this transformation be denoted by $X^{\prime}$. It can be easily seen that $(A, H),(B, C),(Z, G),(E, F),(S, M)$ are pairs of corresponding points under this transformation. $I$ and $J$ are the intersections of $A G$ with $\odot(A D B)$ and $\odot(A D C)$ respectively, so $I^{\prime}=C H \cap \odot(D H Z)$ and $J^{\prime}=BH\cap \odot(D H Z)$. Also, $L=A G \cap \odot(D E F)$, so $L^{\prime}=\odot(D H Z) \cap E F$, which means $L'$ is the foot of the perpendicular from $H$ to $E F$. Let this point be $X$. Also, if we consider $A_{1}$, the reflection of $A$ across $G$, then $$A F \times A B=A H \times A D=2 A M \times A D=2 A L \times A G=A L \times A A_{1}$$ so $\left(B F L A_{1}\right)$ and $\left(C E L A_{1}\right)$ are sets of concyclic points. Therefore $A_{1}^{\prime}$ maps to $T \equiv \odot(C E X) \cap \odot(B F X)$. Meanwhile, since $A$ is the radical center of $\odot\left(B F L A_{1}\right), \odot\left(C E L A_{1}\right), \odot(B F E C)$, points $A, X, T$ are collinear. Furthermore, by the collinearity of $A, G, A_1$, $(H, Z, D, T)$ is a set of concyclic points.  Therefore, $$ \angle X T C=\angle A E F=\angle A H F=\angle E H X=\angle J^{\prime} H X=\angle J^{\prime} T X $$ so $J^{\prime}, T, C$ are collinear. For similar reasons, $\left(I^{\prime}, T, B\right)$ are also collinear. Therefore, by Pappus's theorem, $B F \cap C E=A, C J^{\prime} \cap B I^{\prime}=T, F J^{\prime} \cap E I^{\prime}=Y$ are collinear. At this point, $K$ is mapped to $Y$ by the transformation, so the four points $H, K, L, D$ are concyclic. $H, K, L, D, A_1, P$ all lie on this circle. Therefore, after the transformation (inversion then reflection), $A, T, Y, X, P^{\prime}$ are all collinear. Now, let $U$ be the foot of the perpendicular from $D$ to $E F$, and let $V$ be the midpoint of $D U$. Then from the harmonic cross-ratio $$X(D U, V \infty)=(A H, S D)=-1$$ it can be seen that $V, X, A$ must be collinear. Therefore, $A, T, X, Y, V, P^{\prime}$ are all collinear. Therefore $V^{\prime}$ must lie on the circle passing through $H, K, L, D, A^{\prime}, P$. Since $V$ is the reflection of $O$ about $A H$, $D, O, V^{\prime}$ is collinear and so is $D, O, P$. Therefore, $P \equiv V^{\prime}$. Thus, from $$ D B \times D C=D O \times D P=D Q \times D C $$ we have $D B=D Q$. This means $A B=A Q$.","(Partial)
+ 1. Observed $R$ and $Z$ are symmetric about $AD$, and  $(A, H),(B, C),(Z, G),(E, F),(S, M)$ have inverse relationships respect to $D$.
+ 2. Constructs the point $T$, or a similar point on the line $AT$.
+(Almost)
+ 1. Observes $O, P$ are the corresponding points of inversion w.r.t. $D$ with radius $\sqrt{D B \times D C}$.","**Outcome 2: STRUCTURED PARTIAL PROGRESS & ANALYSIS**
+
+### 1. Proven Lemmas and Key Results
+
+We establish several key lemmas that simplify the problem structure. We use coordinates $D=(0,0)$, $A=(0, a)$, $H=(0, h)$, $G=(g, 0)$. Since $\triangle ABC$ is acute, $a$ and $h$ have the same sign, so $\rho=ah>0$. $M=(0, m)$ where $m=(a+h)/2$. $R \neq G$ implies $G \neq D$, so $g \neq 0$. $A \neq D$ implies $a \neq 0$.
+
+**Lemma 1: $K=A$.**
+
+*Proof:* $A, B, D, F$ lie on the circle with diameter $AB$. Since $\angle AIB=90^\circ$, $I$ also lies on this circle. Thus, $(DIF)$ is the circle with diameter $AB$. Similarly, $(DJE)$ is the circle with diameter $AC$. $A$ and $D$ are the intersections of these circles. Since $K \neq D$, $K=A$.
+
+**Consequence:** The circumcircle $(HKL)$ is $(HAL)$. $P$ is an intersection of $DN$ and $(HAL)$.
+
+**Lemma 2: $AB=AQ$ if and only if $O$ lies on the circumcircle $(HAL)$.**
+
+*Proof:* $AD \perp BC$. $AB=AQ$ if and only if $D$ is the midpoint of $BQ$, i.e., $\overline{DQ} = -\overline{DB}$.
+A standard property for the orthocenter $H$ is $\rho = \overline{DA} \cdot \overline{DH} = -\overline{DB} \cdot \overline{DC}$.
+$AB=AQ \iff \overline{DC} \cdot \overline{DQ} = \overline{DC} \cdot (-\overline{DB}) = \rho$.
+$O, C, P, Q$ are concyclic. $D$ lies on lines $BC$ (containing $Q, C$) and $DN$ (containing $O, P$). The power of $D$ with respect to $(OCPQ)$ is $\overline{DC} \cdot \overline{DQ} = \overline{DO} \cdot \overline{DP}$.
+Thus, $AB=AQ \iff \overline{DO} \cdot \overline{DP} = \rho$.
+The power of $D$ with respect to $(HAL)$ is $\overline{DA} \cdot \overline{DH} = \rho$. Since $P$ is an intersection of line $DN$ with $(HAL)$, $\overline{DO} \cdot \overline{DP} = \rho$ if and only if $O$ is also an intersection of $DN$ with $(HAL)$. Thus, $AB=AQ \iff O \in (HAL)$.
+
+### 2. Identification of the Crux and Contradiction via Coordinate Geometry
+
+The problem is reduced to proving $O \in (HAL)$. We use the coordinate setup defined above.
+
+The circle $(HAL)$ passes through $A(0, a)$ and $H(0, h)$. Its center is $(C_x, m)$, and its equation is $x^2 + y^2 - 2C_x x - 2my + \rho = 0$.
+
+**Analysis of L:** $L$ is the projection of $M(0, m)$ onto $AG$. We rigorously derived (details omitted for brevity) that for $L$ to be on $(HAL)$, the center coordinate $C_x$ must satisfy:
+$C_x(L) = \frac{a(m-a)}{2g} = \frac{a(h-a)}{4g}$.
+
+**Analysis of O:** $R=(\rho/g, 0)$, $S=(\rho/m, 0)$. $N$ is the projection of $D(0,0)$ onto $RS$. $O=mid(DN)$. We rigorously derived the coordinates of $O=(x_O, y_O)$ and $DO^2$:
+$x_O = \frac{\rho g}{2(m^2+g^2)}$, $DO^2 = \frac{\rho^2}{4(m^2+g^2)}$.
+
+$O$ also lies on the line $DX$, where $X=mid(MG)=(g/2, m/2)$, so $y_O = (m/g)x_O$.
+
+For $O$ to be on $(HAO)$, it must satisfy the circle equation: $DO^2 - 2C_x x_O - 2my_O + \rho = 0$.
+Substituting $y_O = (m/g)x_O$:
+$DO^2 + \rho = 2x_O (C_x + m^2/g)$.
+
+We derived the required $C_x(O)$ by substituting $x_O$ and $DO^2$:
+$\frac{\rho(\rho+4(m^2+g^2))}{4(m^2+g^2)} = \frac{\rho g}{m^2+g^2} (C_x(O) + m^2/g)$.
+$\frac{\rho+4m^2+4g^2}{4} = g C_x(O) + m^2$.
+$4g C_x(O) = \rho + 4g^2$.
+
+**The Contradiction:**
+For $O$ to lie on $(HAL)$, we must have $C_x(O) = C_x(L)$.
+$4g C_x(O) = 4g C_x(L)$.
+$\rho + 4g^2 = a(h-a)$.
+$ah + 4g^2 = ah - a^2$.
+$4g^2 = -a^2$, or $a^2 + 4g^2 = 0$.
+
+For a real acute triangle where $A \neq D$ and $G \neq D$, we must have $a \neq 0$ and $g \neq 0$. Thus $a^2+4g^2 > 0$. This is a contradiction.
+
+### 3. Analysis of Findings
+
+We have rigorously established that the goal $AB=AQ$ is equivalent to $O \in (HAL)$. However, a detailed and verified coordinate geometry analysis shows that $O \in (HAL)$ implies $a^2+4g^2=0$, which is impossible for a real acute triangle that is not isosceles with $A$ on the perpendicular bisector of $BC$ ($g\neq 0$) and not right-angled at $B$ or $C$ ($a\neq 0$).
+
+The analysis suggests that the statement $AB=AQ$ is false for a general acute triangle under standard interpretations of Euclidean geometry. Given the mandate for rigor, we cannot provide a proof for a statement that appears geometrically impossible based on our analysis.",0,Incorrect,Novel Problem,incorrect

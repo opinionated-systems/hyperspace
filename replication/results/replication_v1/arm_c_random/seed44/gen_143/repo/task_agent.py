@@ -1,0 +1,147 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    """
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            continue
+    return results or None
+
+
+def _extract_json_with_retry(text: str, max_retries: int = 2) -> list[dict] | None:
+    """Extract JSON with multiple fallback strategies.
+    
+    First tries standard extraction, then attempts to fix common
+    JSON formatting issues like trailing commas.
+    """
+    # First attempt: standard extraction
+    result = _extract_jsons(text)
+    if result:
+        return result
+    
+    # Retry with common fixes
+    for attempt in range(max_retries):
+        try:
+            # Try to find and fix JSON with trailing commas
+            fixed_text = re.sub(r',(\s*[}\]])', r'\1', text)
+            result = _extract_jsons(fixed_text)
+            if result:
+                logger.debug(f"JSON extraction succeeded after fix attempt {attempt + 1}")
+                return result
+        except Exception:
+            pass
+    
+    return None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems with chain-of-thought reasoning."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract key fields for better prompting
+        domain = inputs.get("domain", "Mathematics")
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+
+        instruction = f"""You are an expert grader for {domain} problems. Your task is to evaluate a student's answer against the official solution and grading guidelines.
+
+## Problem Statement:
+{problem}
+
+## Official Solution:
+{solution}
+
+## Grading Guidelines:
+{grading_guidelines}
+
+## Student's Answer:
+{student_answer}
+
+## Your Task:
+1. Carefully analyze the student's answer step by step
+2. Compare it against the official solution and grading guidelines
+3. Identify what the student got correct and what they missed
+4. Provide your reasoning before giving the final grade
+
+Respond in JSON format with the following schema:
+<json>
+{{
+    "reasoning": "Your detailed analysis of the student's answer...",
+    "response": "The final grade/assessment"
+}}
+</json>
+
+The "response" field should contain only the final grade (e.g., "Correct", "Partially Correct", "Incorrect", or a numeric score as specified in the grading guidelines)."""
+
+        response, msg_history, info = get_response_from_llm(
+            msg=instruction,
+            model=self.model,
+            msg_history=[],
+        )
+
+        # Extract prediction from JSON with retry mechanism
+        prediction = "None"
+        reasoning = ""
+        try:
+            extracted = _extract_json_with_retry(msg_history[-1]["text"])
+            if extracted:
+                last_entry = extracted[-1]
+                if "response" in last_entry:
+                    prediction = last_entry["response"]
+                if "reasoning" in last_entry:
+                    reasoning = last_entry["reasoning"]
+                    self.log_fn(f"Reasoning: {reasoning[:200]}...")
+        except Exception as e:
+            self.log_fn(f"Error extracting prediction: {e}")
+
+        return str(prediction), msg_history

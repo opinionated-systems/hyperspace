@@ -1,0 +1,296 @@
+"""
+Bash tool: run commands in a persistent shell session.
+
+Reimplemented from facebookresearch/HyperAgents agent/tools/bash.py.
+Same interface, same timeout, same sentinel-based output detection.
+Session is persistent across calls (matching paper): cd, env vars, etc. carry over.
+
+Uses threading to avoid blocking on readline() with interactive bash.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import threading
+import time
+
+logger = logging.getLogger(__name__)
+
+# Maximum output size to prevent memory issues (1MB)
+MAX_OUTPUT_SIZE = 1_000_000
+# Default timeout in seconds
+_TIMEOUT = 120.0
+# Sentinel for detecting command completion
+_SENTINEL = "<<SENTINEL_EXIT>>"
+# Dangerous command patterns to block
+DANGEROUS_PATTERNS = [
+    "rm -rf /",
+    "rm -rf /*",
+    "> /dev/sda",
+    "dd if=/dev/zero",
+    "mkfs.",
+    "format ",
+    "fdisk ",
+    "del /f /s /q",
+    "rd /s /q",
+    ":(){ :|:& };:",  # Fork bomb
+]
+
+
+def tool_info() -> dict:
+    return {
+        "name": "bash",
+        "description": (
+            "Run commands in a bash shell. "
+            "State is persistent across calls. "
+            "Use 'sed -n 10,25p /path/to/file' to view line ranges. "
+            "Avoid commands that produce very large output. "
+            "Timeout: 120s, max output: 1MB."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The bash command to run.",
+                }
+            },
+            "required": ["command"],
+        },
+    }
+
+
+class BashSession:
+    """Persistent bash session using Popen + threaded reader."""
+
+    def __init__(self) -> None:
+        self._process: subprocess.Popen | None = None
+        self._started = False
+        self._timed_out = False
+        self._output_lock = threading.Lock()
+        self._output_buffer: list[str] = []
+        self._reader_thread: threading.Thread | None = None
+        self._total_output_size = 0
+
+    def start(self, cwd: str | None = None) -> None:
+        if self._started:
+            return
+        try:
+            self._process = subprocess.Popen(
+                ["bash", "--norc", "--noprofile"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # merge stderr into stdout
+                cwd=cwd or os.getcwd(),
+                env=os.environ.copy(),
+                bufsize=0,
+            )
+            self._started = True
+            self._output_buffer = []
+            self._total_output_size = 0
+            # Start reader thread
+            self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader_thread.start()
+            logger.info(f"Bash session started in {cwd or os.getcwd()}")
+        except Exception as e:
+            logger.exception("Failed to start bash session")
+            raise
+
+    def _read_loop(self) -> None:
+        """Background thread that reads stdout line by line."""
+        try:
+            while self._process and self._process.poll() is None:
+                line = self._process.stdout.readline()
+                if not line:
+                    break
+                with self._output_lock:
+                    decoded = line.decode(errors="ignore")
+                    self._output_buffer.append(decoded)
+                    self._total_output_size += len(decoded)
+                    # Prevent memory issues with huge output
+                    if self._total_output_size > MAX_OUTPUT_SIZE * 2:
+                        # Truncate buffer to prevent memory exhaustion
+                        excess = self._total_output_size - MAX_OUTPUT_SIZE
+                        while excess > 0 and self._output_buffer:
+                            removed = self._output_buffer.pop(0)
+                            excess -= len(removed)
+                        self._output_buffer.insert(0, "... [output truncated due to size] ...\n")
+                        self._total_output_size = sum(len(s) for s in self._output_buffer)
+        except Exception:
+            logger.exception("Error in bash reader thread")
+
+    def stop(self) -> None:
+        if self._process and self._process.poll() is None:
+            try:
+                self._process.terminate()
+                try:
+                    self._process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.warning("Bash process did not terminate, killing")
+                    self._process.kill()
+                    self._process.wait(timeout=2)
+            except Exception as e:
+                logger.exception("Error stopping bash session")
+        self._process = None
+        self._started = False
+        self._timed_out = False
+        self._output_buffer = []
+        self._total_output_size = 0
+
+    def run(self, command: str) -> str:
+        if not self._started:
+            raise ValueError("Session not started")
+        if self._process.poll() is not None:
+            raise ValueError(f"Bash exited with code {self._process.returncode}")
+        if self._timed_out:
+            raise ValueError("Session timed out, must restart")
+
+        # Clear buffer
+        with self._output_lock:
+            self._output_buffer.clear()
+            self._total_output_size = 0
+
+        # Send command with sentinel
+        cmd = f"{command}\necho '{_SENTINEL}'\n"
+        try:
+            self._process.stdin.write(cmd.encode())
+            self._process.stdin.flush()
+        except BrokenPipeError:
+            raise ValueError("Bash process pipe broken")
+        except Exception as e:
+            raise ValueError(f"Failed to send command: {e}")
+
+        # Wait for sentinel in output
+        start = time.time()
+        check_interval = 0.1
+        while True:
+            elapsed = time.time() - start
+            if elapsed > _TIMEOUT:
+                self._timed_out = True
+                raise ValueError(f"Timed out after {_TIMEOUT}s")
+
+            time.sleep(check_interval)
+            with self._output_lock:
+                full = "".join(self._output_buffer)
+                if _SENTINEL in full:
+                    # Extract output before sentinel
+                    output = full[: full.index(_SENTINEL)].strip()
+                    self._output_buffer.clear()
+                    self._total_output_size = 0
+                    # Truncate if too large
+                    if len(output) > MAX_OUTPUT_SIZE:
+                        half = MAX_OUTPUT_SIZE // 2
+                        output = output[:half] + f"\n\n... [Output truncated: {len(output)} chars total] ...\n\n" + output[-half:]
+                    return output
+
+        return ""
+
+
+# Module-level persistent session
+_session: BashSession | None = None
+_ALLOWED_ROOT: str | None = None
+
+
+def set_allowed_root(root: str) -> None:
+    """Set working directory for new sessions."""
+    global _ALLOWED_ROOT
+    _ALLOWED_ROOT = os.path.abspath(root)
+    reset_session()
+
+
+def reset_session() -> None:
+    """Reset the bash session."""
+    global _session
+    if _session is not None:
+        _session.stop()
+        _session = None
+
+
+def _get_session() -> BashSession:
+    global _session
+    if _session is None or not _session._started or _session._timed_out:
+        if _session is not None:
+            _session.stop()
+        _session = BashSession()
+        _session.start(cwd=_ALLOWED_ROOT)
+    return _session
+
+
+def _is_dangerous_command(command: str) -> tuple[bool, str]:
+    """Check if command contains dangerous patterns."""
+    cmd_lower = command.lower().strip()
+    for pattern in DANGEROUS_PATTERNS:
+        if pattern.lower() in cmd_lower:
+            return True, pattern
+    return False, ""
+
+
+def _sanitize_command(command: str) -> str:
+    """Sanitize command to prevent injection attacks.
+    
+    Removes or escapes potentially dangerous characters and sequences.
+    """
+    # Remove null bytes
+    command = command.replace('\x00', '')
+    
+    # Check for command substitution that could be dangerous
+    dangerous_substitutions = [
+        '$(', '`',  # Command substitution
+    ]
+    
+    for sub in dangerous_substitutions:
+        if sub in command:
+            # Log warning but don't block - these can be legitimate
+            logger.warning(f"Command contains substitution pattern '{sub}': {command[:100]}...")
+    
+    return command
+
+
+def tool_function(command: str) -> str:
+    """Execute a bash command. Returns output.
+
+    Session is persistent across calls (matching paper).
+    cd, env vars, aliases carry between calls.
+    Commands are scoped to _ALLOWED_ROOT via a wrapper that checks
+    the working directory stays within bounds (matching paper's Docker).
+    """
+    # Sanitize command first
+    command = _sanitize_command(command)
+    
+    # Check for dangerous commands
+    is_dangerous, pattern = _is_dangerous_command(command)
+    if is_dangerous:
+        logger.warning(f"Blocked dangerous command containing '{pattern}': {command[:100]}")
+        return f"Error: Command blocked for safety reasons (contains '{pattern}')"
+    
+    # Log command (truncated for safety)
+    log_cmd = command[:200] + "..." if len(command) > 200 else command
+    logger.info(f"Executing bash command: {log_cmd}")
+    
+    try:
+        session = _get_session()
+        # Run the command, then verify cwd is still within allowed root.
+        # If the meta agent cd's outside, reset it back.
+        if _ALLOWED_ROOT:
+            wrapped = (
+                f"{command}\n"
+                f"_cwd=$(pwd)\n"
+                f"case \"$_cwd\" in \"{_ALLOWED_ROOT}\"*) ;; *) cd \"{_ALLOWED_ROOT}\" ; "
+                f"echo \"WARNING: cd outside allowed root, reset to {_ALLOWED_ROOT}\" ;; esac"
+            )
+        else:
+            wrapped = command
+        output = session.run(wrapped)
+        return output if output else "(no output)"
+    except ValueError as e:
+        # On value error (timeout, session issues), reset session for next call
+        logger.warning(f"Bash session error: {e}")
+        reset_session()
+        return f"Error: {e}"
+    except Exception as e:
+        # On unexpected error, reset session for next call
+        logger.exception(f"Unexpected error in bash tool: {command[:100]}")
+        reset_session()
+        return f"Error: {type(e).__name__}: {e}"

@@ -1,0 +1,12 @@
+{
+  "parent": 8,
+  "forked_from": 8,
+  "valid": true,
+  "tournament": true,
+  "winner": "directed",
+  "blind_score": 0.06,
+  "directed_score": 0.31,
+  "train_score": 0.31,
+  "val_score": 0.3,
+  "run_full_eval": true
+}

@@ -1,0 +1,46 @@
+[project]
+name = "hyperagents"
+version = "0.1.0"
+description = "Collective meta-learning for self-modifying LLM agents via stigmergic coordination"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "markspace>=0.1.3b0",
+    "pydantic>=2.0,<3.0",
+    "httpx>=0.24,<1.0",
+    "python-dotenv>=1.0,<2.0",
+    "tqdm (>=4.67.3,<5.0.0)",
+    "datasets (>=4.8.4,<5.0.0)",
+    "huggingface-hub (>=1.7.2,<2.0.0)",
+    "matplotlib (>=3.10.8,<4.0.0)",
+    "scikit-learn (>=1.8.0,<2.0.0)",
+    "numpy (>=1.24,<3.0)",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "hypothesis>=6.0",
+]
+experiments = [
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.pyright]
+include = ["hyperagents", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+
+[dependency-groups]
+dev = [
+    "pre-commit (>=4.5.1,<5.0.0)",
+    "scipy (>=1.17.1,<2.0.0)",
+]

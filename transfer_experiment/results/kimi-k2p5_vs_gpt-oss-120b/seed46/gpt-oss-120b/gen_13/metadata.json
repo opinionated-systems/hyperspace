@@ -1,0 +1,4 @@
+{
+  "valid": false,
+  "error": "cannot import name 'chat_with_agent' from 'agent.llm_client' (/tmp/tmpq408opup/agent/llm_client.py)"
+}

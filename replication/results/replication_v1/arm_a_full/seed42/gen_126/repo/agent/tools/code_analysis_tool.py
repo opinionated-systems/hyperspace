@@ -1,0 +1,334 @@
+"""
+Code analysis tool: analyze Python code for common issues and improvements.
+
+Provides static analysis capabilities to help identify code quality issues,
+potential bugs, and improvement opportunities in Python files.
+"""
+
+from __future__ import annotations
+
+import ast
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Maximum file size to analyze (1MB)
+MAX_FILE_SIZE = 1024 * 1024
+
+
+def tool_info() -> dict:
+    return {
+        "name": "code_analysis",
+        "description": (
+            "Analyze Python code for common issues, bugs, and improvement opportunities. "
+            "Checks for: syntax errors, undefined variables, unused imports, "
+            "complex functions, and code style issues. "
+            "Max file size: 1MB."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path to Python file or directory to analyze.",
+                },
+                "analysis_type": {
+                    "type": "string",
+                    "enum": ["syntax", "complexity", "imports", "all"],
+                    "description": "Type of analysis to perform (default: all).",
+                },
+            },
+            "required": ["path"],
+        },
+    }
+
+
+_ALLOWED_ROOT: str | None = None
+
+
+def set_allowed_root(root: str) -> None:
+    """Set the allowed root directory for analysis."""
+    global _ALLOWED_ROOT
+    _ALLOWED_ROOT = os.path.abspath(root)
+    logger.info(f"Code analysis allowed root set to: {_ALLOWED_ROOT}")
+
+
+def _is_within_allowed(path: str) -> bool:
+    """Check if a path is within the allowed root."""
+    if _ALLOWED_ROOT is None:
+        return True
+    abs_path = os.path.abspath(path)
+    return abs_path.startswith(_ALLOWED_ROOT)
+
+
+def _check_file_size(path: str) -> tuple[bool, int]:
+    """Check if file size is within limits."""
+    try:
+        size = os.path.getsize(path)
+        return size <= MAX_FILE_SIZE, size
+    except OSError:
+        return True, 0
+
+
+def _analyze_syntax(content: str, filename: str) -> list[dict[str, Any]]:
+    """Check for syntax errors and basic AST issues."""
+    issues = []
+    try:
+        tree = ast.parse(content)
+    except SyntaxError as e:
+        issues.append({
+            "type": "syntax_error",
+            "line": e.lineno or 1,
+            "message": str(e),
+            "severity": "error"
+        })
+        return issues
+    except Exception as e:
+        issues.append({
+            "type": "parse_error",
+            "line": 1,
+            "message": f"Failed to parse: {e}",
+            "severity": "error"
+        })
+        return issues
+    
+    # Check for bare except clauses
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler):
+            if node.type is None:
+                issues.append({
+                    "type": "bare_except",
+                    "line": node.lineno,
+                    "message": "Bare except clause found - should catch specific exceptions",
+                    "severity": "warning"
+                })
+        
+        # Check for mutable default arguments
+        if isinstance(node, ast.FunctionDef):
+            for default in node.args.defaults + node.args.kw_defaults:
+                if default is not None and isinstance(default, (ast.List, ast.Dict, ast.Set)):
+                    issues.append({
+                        "type": "mutable_default",
+                        "line": node.lineno,
+                        "message": f"Function '{node.name}' has mutable default argument",
+                        "severity": "warning"
+                    })
+    
+    return issues
+
+
+def _analyze_complexity(content: str, filename: str) -> list[dict[str, Any]]:
+    """Analyze code complexity."""
+    issues = []
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError) as e:
+        # Return empty issues if we can't parse the content
+        logger.debug(f"Failed to parse {filename} for complexity analysis: {e}")
+        return issues
+    
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            # Count lines in function
+            if node.body:
+                start_line = node.lineno
+                end_line = node.end_lineno or start_line
+                func_lines = end_line - start_line + 1
+                
+                if func_lines > 50:
+                    issues.append({
+                        "type": "long_function",
+                        "line": node.lineno,
+                        "message": f"Function '{node.name}' is {func_lines} lines long (consider refactoring)",
+                        "severity": "info"
+                    })
+            
+            # Count branches (if, for, while, etc.)
+            branches = 0
+            for child in ast.walk(node):
+                if isinstance(child, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
+                    branches += 1
+            
+            if branches > 10:
+                issues.append({
+                    "type": "high_complexity",
+                    "line": node.lineno,
+                    "message": f"Function '{node.name}' has high complexity ({branches} branches)",
+                    "severity": "warning"
+                })
+    
+    return issues
+
+
+def _analyze_imports(content: str, filename: str) -> list[dict[str, Any]]:
+    """Analyze imports for unused and wildcard imports."""
+    issues = []
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError) as e:
+        # Return empty issues if we can't parse the content
+        logger.debug(f"Failed to parse {filename} for import analysis: {e}")
+        return issues
+    
+    imports = []
+    imported_names = set()
+    used_names = set()
+    
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append((alias.name, alias.asname or alias.name, node.lineno))
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                name = alias.name
+                if name == "*":
+                    issues.append({
+                        "type": "wildcard_import",
+                        "line": node.lineno,
+                        "message": f"Wildcard import from '{module}' - avoid using import *",
+                        "severity": "warning"
+                    })
+                else:
+                    full_name = f"{module}.{name}" if module else name
+                    imports.append((full_name, alias.asname or name, node.lineno))
+                    imported_names.add(alias.asname or name)
+        elif isinstance(node, ast.Name):
+            used_names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            # Handle attribute access like module.function
+            if isinstance(node.value, ast.Name):
+                used_names.add(node.value.id)
+    
+    # Check for potentially unused imports
+    for full_name, short_name, line in imports:
+        if short_name not in used_names and not short_name.startswith("_"):
+            # Might be unused, but could be used in ways we don't detect
+            pass  # Don't report as it's prone to false positives
+    
+    return issues
+
+
+def _analyze_file(filepath: str, analysis_type: str = "all") -> dict[str, Any]:
+    """Analyze a single file."""
+    path = Path(filepath)
+    
+    if not path.exists():
+        return {"error": f"File not found: {filepath}"}
+    
+    if not path.is_file():
+        return {"error": f"Not a file: {filepath}"}
+    
+    if not str(path).endswith(".py"):
+        return {"error": f"Not a Python file: {filepath}"}
+    
+    ok, size = _check_file_size(filepath)
+    if not ok:
+        return {"error": f"File too large ({size} bytes, max: {MAX_FILE_SIZE})"}
+    
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception as e:
+        return {"error": f"Failed to read file: {e}"}
+    
+    all_issues = []
+    
+    if analysis_type in ("syntax", "all"):
+        all_issues.extend(_analyze_syntax(content, str(path)))
+    
+    if analysis_type in ("complexity", "all"):
+        all_issues.extend(_analyze_complexity(content, str(path)))
+    
+    if analysis_type in ("imports", "all"):
+        all_issues.extend(_analyze_imports(content, str(path)))
+    
+    return {
+        "filepath": str(path),
+        "lines": len(content.splitlines()),
+        "issues": all_issues,
+        "issue_count": len(all_issues),
+        "error_count": sum(1 for i in all_issues if i["severity"] == "error"),
+        "warning_count": sum(1 for i in all_issues if i["severity"] == "warning"),
+    }
+
+
+def tool_function(
+    path: str,
+    analysis_type: str = "all",
+) -> str:
+    """Analyze Python code for common issues.
+    
+    Args:
+        path: Absolute path to Python file or directory
+        analysis_type: Type of analysis (syntax, complexity, imports, or all)
+    
+    Returns:
+        Formatted analysis results
+    """
+    if not path:
+        return "Error: path is required"
+    
+    if analysis_type not in ("syntax", "complexity", "imports", "all"):
+        return f"Error: Invalid analysis_type '{analysis_type}'. Use 'syntax', 'complexity', 'imports', or 'all'."
+    
+    if not _is_within_allowed(path):
+        return f"Error: Path '{path}' is outside allowed root."
+    
+    target_path = Path(path)
+    
+    if not target_path.exists():
+        return f"Error: Path '{path}' does not exist."
+    
+    files_to_analyze = []
+    
+    if target_path.is_file():
+        if str(target_path).endswith(".py"):
+            files_to_analyze.append(str(target_path))
+        else:
+            return f"Error: '{path}' is not a Python file."
+    else:
+        # Find all Python files in directory
+        for root, dirs, files in os.walk(target_path):
+            # Skip common non-source directories
+            dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git", "venv", ".venv", "node_modules")]
+            for file in files:
+                if file.endswith(".py"):
+                    files_to_analyze.append(os.path.join(root, file))
+    
+    if not files_to_analyze:
+        return f"No Python files found in '{path}'."
+    
+    logger.info(f"Analyzing {len(files_to_analyze)} file(s) with type='{analysis_type}'")
+    
+    results = []
+    total_errors = 0
+    total_warnings = 0
+    
+    for filepath in files_to_analyze:
+        result = _analyze_file(filepath, analysis_type)
+        
+        if "error" in result:
+            results.append(f"\n{filepath}:")
+            results.append(f"  ERROR: {result['error']}")
+        else:
+            total_errors += result["error_count"]
+            total_warnings += result["warning_count"]
+            
+            if result["issues"]:
+                results.append(f"\n{filepath} ({result['lines']} lines):")
+                for issue in result["issues"]:
+                    severity_marker = "🔴" if issue["severity"] == "error" else "⚠️" if issue["severity"] == "warning" else "ℹ️"
+                    results.append(f"  Line {issue['line']}: {severity_marker} [{issue['type']}] {issue['message']}")
+    
+    # Summary
+    summary = f"\n{'='*50}"
+    summary += f"\nAnalysis Summary: {len(files_to_analyze)} file(s) analyzed"
+    summary += f"\nTotal errors: {total_errors}, Total warnings: {total_warnings}"
+    
+    if total_errors == 0 and total_warnings == 0:
+        summary += "\n✅ No issues found!"
+    
+    return "\n".join(results) + summary

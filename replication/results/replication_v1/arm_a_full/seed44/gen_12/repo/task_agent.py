@@ -1,0 +1,255 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import Any
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    """
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            continue
+    return results or None
+
+
+def _extract_json_with_regex(text: str) -> list[dict] | None:
+    """Fallback JSON extraction using regex for malformed outputs."""
+    results = []
+    # Try to find JSON objects in code blocks
+    code_block_pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
+    matches = re.findall(code_block_pattern, text, re.DOTALL)
+    for match in matches:
+        try:
+            results.append(json.loads(match.strip()))
+        except json.JSONDecodeError:
+            continue
+    
+    # Try to find JSON objects with curly braces - improved pattern
+    if not results:
+        # More flexible pattern to catch nested structures
+        json_pattern = r'\{[\s\S]*?"response"[\s\S]*?\}'
+        matches = re.findall(json_pattern, text)
+        for match in matches:
+            try:
+                results.append(json.loads(match))
+            except json.JSONDecodeError:
+                continue
+    
+    return results or None
+
+
+def _extract_response_heuristic(text: str) -> Any | None:
+    """Last resort: try to extract a response value using heuristics."""
+    # Look for patterns like "response": 7 or "response": "correct"
+    patterns = [
+        r'"response"\s*:\s*(-?\d+(?:\.\d+)?)',  # Numbers
+        r'"response"\s*:\s*"([^"]*)"',  # Strings
+        r'"response"\s*:\s*(true|false|null)',  # Booleans/null
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            value = match.group(1)
+            # Try to convert to number if it looks like one
+            try:
+                if '.' in value:
+                    return float(value)
+                return int(value)
+            except ValueError:
+                # Return as string, handling boolean/null
+                if value.lower() == 'true':
+                    return True
+                elif value.lower() == 'false':
+                    return False
+                elif value.lower() == 'null':
+                    return None
+                return value
+    
+    # Try to find any number that might be a score (0-10 range)
+    score_pattern = r'\b([0-9]|10)\b'
+    matches = re.findall(score_pattern, text)
+    if matches:
+        # Return the last number found (often the final score)
+        return int(matches[-1])
+    
+    return None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def _build_grading_prompt(
+        self,
+        domain: str,
+        problem: str,
+        solution: str,
+        grading_guidelines: str,
+        student_answer: str,
+    ) -> str:
+        """Build the grading prompt with clear instructions."""
+        return f"""You are an expert mathematical grader evaluating student solutions to competition mathematics problems.
+
+Your task is to grade a student's answer to an IMO-level mathematics problem. You must carefully analyze:
+1. The problem statement
+2. The official solution
+3. The grading guidelines (rubric)
+4. The student's submitted answer
+
+Then provide your evaluation in the specified JSON format.
+
+PROBLEM DOMAIN: {domain}
+
+PROBLEM STATEMENT:
+```
+{problem}
+```
+
+OFFICIAL SOLUTION:
+```
+{solution}
+```
+
+GRADING GUIDELINES (RUBRIC):
+```
+{grading_guidelines}
+```
+
+STUDENT'S ANSWER:
+```
+{student_answer}
+```
+
+INSTRUCTIONS:
+1. Read the problem carefully and understand what is being asked.
+2. Study the official solution to understand the correct approach.
+3. Review the grading guidelines to understand how points are awarded.
+4. Analyze the student's answer step by step:
+   - Did they understand the problem correctly?
+   - Did they use the right approach?
+   - Are their calculations correct?
+   - Did they provide a complete proof/solution?
+   - Where did they make errors, if any?
+5. Assign a score based on the grading guidelines.
+
+IMPORTANT: Your response MUST be valid JSON wrapped in <json> tags.
+
+Respond in JSON format with the following schema:
+<json>
+{{
+    "response": <your numerical score or evaluation>
+}}
+</json>
+
+The "response" field should contain your final grading decision (typically a number or specific evaluation string as specified in the grading guidelines).
+
+Examples of valid responses:
+<json>
+{{
+    "response": 7
+}}
+</json>
+
+<json>
+{{
+    "response": "0/1"
+}}
+</json>"""
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract key fields for better prompt construction
+        domain = inputs.get("domain", "Mathematics")
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+
+        instruction = self._build_grading_prompt(
+            domain, problem, solution, grading_guidelines, student_answer
+        )
+
+        try:
+            response, msg_history, info = get_response_from_llm(
+                msg=instruction,
+                model=self.model,
+                msg_history=[],
+            )
+        except Exception as e:
+            self.log_fn(f"LLM call failed: {e}")
+            return "None", [{"role": "error", "text": str(e)}]
+
+        # Extract prediction from JSON with multiple fallback strategies
+        prediction = "None"
+        raw_response = msg_history[-1]["text"] if msg_history else ""
+        
+        extraction_attempts = [
+            ("json_tags", lambda: _extract_jsons(raw_response)),
+            ("regex", lambda: _extract_json_with_regex(raw_response)),
+            ("heuristic", lambda: [{"response": _extract_response_heuristic(raw_response)}] if _extract_response_heuristic(raw_response) is not None else None),
+        ]
+        
+        for method_name, attempt_fn in extraction_attempts:
+            try:
+                extracted = attempt_fn()
+                if extracted and isinstance(extracted, list) and len(extracted) > 0:
+                    last_result = extracted[-1]
+                    if isinstance(last_result, dict) and "response" in last_result:
+                        prediction = last_result["response"]
+                        self.log_fn(f"Successfully extracted prediction using {method_name}: {prediction}")
+                        break
+            except Exception as e:
+                self.log_fn(f"Extraction method {method_name} failed: {e}")
+                continue
+        
+        if prediction == "None":
+            self.log_fn(f"Failed to extract prediction from response. Raw text (first 1000 chars): {raw_response[:1000]}")
+            # Try to log more context for debugging
+            if raw_response:
+                self.log_fn(f"Response length: {len(raw_response)} chars")
+
+        return str(prediction), msg_history

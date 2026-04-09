@@ -1,0 +1,510 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    """
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            # Try to fix common JSON issues
+            try:
+                # Remove trailing commas before closing braces/brackets
+                fixed = re.sub(r',(\s*[}\]])', r'\1', inner)
+                results.append(json.loads(fixed))
+            except json.JSONDecodeError:
+                # Try to extract just the response field with regex
+                try:
+                    response_match = re.search(r'"response"\s*:\s*"([^"]+)"', inner)
+                    if response_match:
+                        results.append({"response": response_match.group(1)})
+                except Exception:
+                    continue
+    return results or None
+
+
+def _extract_json_from_markdown(text: str) -> list[dict] | None:
+    """Extract JSON objects from markdown code blocks like ```json...```.
+    
+    Also handles plain JSON objects that might not be wrapped in tags.
+    """
+    results = []
+    
+    # Try to find JSON in markdown code blocks
+    pattern = r'```json\s*(.*?)\s*```'
+    matches = re.findall(pattern, text, re.DOTALL)
+    for match in matches:
+        try:
+            results.append(json.loads(match.strip()))
+        except json.JSONDecodeError:
+            # Try to fix common JSON issues
+            try:
+                fixed = re.sub(r',(\s*[}\]])', r'\1', match.strip())
+                results.append(json.loads(fixed))
+            except json.JSONDecodeError:
+                # Try to extract just the response field with regex
+                try:
+                    response_match = re.search(r'"response"\s*:\s*"([^"]+)"', match)
+                    if response_match:
+                        results.append({"response": response_match.group(1)})
+                except Exception:
+                    continue
+    
+    # Try to find plain JSON objects (looking for {"response": ...} pattern)
+    # This handles cases where the LLM outputs JSON without proper tags
+    plain_json_pattern = r'\{\s*"response"\s*:\s*"([^"]+)"\s*\}'
+    plain_matches = re.findall(plain_json_pattern, text, re.DOTALL)
+    for match in plain_matches:
+        try:
+            results.append({"response": match})
+        except Exception:
+            continue
+    
+    return results or None
+
+
+def _extract_json_flexible(text: str) -> list[dict] | None:
+    """Extract JSON objects with flexible parsing.
+    
+    Tries multiple strategies:
+    1. Look for <json>...</json> tags
+    2. Look for ```json...``` code blocks
+    3. Look for plain JSON objects with "response" field
+    4. Look for raw JSON objects in the text
+    """
+    results = []
+    
+    # Strategy 1: Try <json> tags first
+    results = _extract_jsons(text)
+    if results:
+        return results
+    
+    # Strategy 2: Try markdown code blocks and plain JSON
+    results = _extract_json_from_markdown(text)
+    if results:
+        return results
+    
+    # Strategy 3: Look for raw JSON objects (brace matching)
+    # Find all potential JSON starting points
+    for match in re.finditer(r'\{', text):
+        start = match.start()
+        # Try to find matching closing brace
+        brace_count = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                brace_count += 1
+            elif text[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    try:
+                        json_obj = json.loads(text[start:i+1])
+                        results.append(json_obj)
+                    except json.JSONDecodeError:
+                        pass
+                    break
+    
+    return results or None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer, points
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract key fields for better context
+        domain = inputs.get('domain', 'Unknown')
+        problem = inputs.get('problem', '')
+        solution = inputs.get('solution', '')
+        grading_guidelines = inputs.get('grading_guidelines', '')
+        student_answer = inputs.get('student_answer', '')
+        
+        instruction = f"""You are an expert mathematical grader evaluating IMO-level solutions. Classify the student's solution into exactly ONE of: Correct, Almost, Partial, or Incorrect.
+
+DOMAIN: {domain}
+
+PROBLEM:
+{problem}
+
+OFFICIAL SOLUTION:
+{solution}
+
+GRADING GUIDELINES:
+{grading_guidelines}
+
+STUDENT'S ANSWER TO EVALUATE:
+{student_answer}
+
+=== CLASSIFICATION DEFINITIONS ===
+
+**Correct**: Complete, rigorous, correct solution. ALL claims proven, ALL cases handled, NO gaps. Full marks.
+
+**Almost**: COMPLETE proof structure with only MINOR issues (calculation errors, missing trivial case, minor flaw). 90-95% complete. "Essentially correct, just needs polishing."
+
+**Partial**: SUBSTANTIAL progress with KEY mathematical insights found, but proof structure INCOMPLETE. "Found the key idea, but substantial work remains." Must have at least ONE significant non-trivial insight that advances toward the solution.
+
+**Incorrect**: NO meaningful mathematical progress. Just restating problem, trivial observations, wrong approach. Be CONSERVATIVE. If the student only states obvious facts or makes no real attempt, this is INCORRECT.
+
+=== CRITICAL DISTINCTIONS ===
+
+**Partial vs Incorrect** (THIS IS THE HARDEST DISTINCTION):
+- PARTIAL: Student found a KEY INSIGHT that actually helps solve the problem. They may have proven a useful lemma, identified the right approach, or made significant non-trivial progress. Even if the final proof is incomplete, they demonstrated real mathematical understanding.
+- INCORRECT: Student is just playing with symbols, stating obvious facts, or going down a completely wrong path. No insight that would help solve the problem.
+
+**Almost vs Partial**:
+- ALMOST: The proof structure is essentially complete. If you fixed the minor issues, you'd have a full solution. The main logical flow is there.
+- PARTIAL: Major sections are missing. The student found something useful but there's still substantial work to do.
+
+=== DECISION RULES ===
+
+1. Check "Correct" first: Complete proof? ALL claims proven? ALL cases? NO gaps? → Correct
+2. If not Correct, check "Almost": Complete structure? Main arguments present? Only minor issues? → Almost
+3. If not Almost, check "Partial": Did the student find a KEY INSIGHT that advances the solution? Is there SUBSTANTIAL non-trivial progress? → Partial
+4. Otherwise → Incorrect
+
+=== KEY PRINCIPLES ===
+
+- **When in doubt between Partial and Incorrect, ask**: "Did they find something that actually helps solve this problem?" If yes → Partial. If no → Incorrect.
+- **When in doubt, choose LOWER** (more conservative).
+- **Almost is rare**: Most incomplete solutions are Partial, not Almost.
+- **Partial requires insight**: Just writing down equations or restating in different words is NOT enough for Partial.
+- Check the GRADING GUIDELINES for this specific problem.
+
+=== OUTPUT FORMAT (STRICT) ===
+
+Output ONLY a JSON block in this exact format:
+
+<json>
+{{
+    "response": "LABEL: Your brief reasoning here"
+}}
+</json>
+
+Where LABEL is exactly one of: Correct, Almost, Partial, Incorrect
+
+CRITICAL:
+- Start with exact label followed by colon
+- Wrap in <json>...</json> tags
+- NO text outside JSON block
+- Be concise but mention the key insight if Partial
+
+EXAMPLES:
+<json>
+{{
+    "response": "Correct: Complete rigorous proof with all cases handled."
+}}
+</json>
+
+<json>
+{{
+    "response": "Almost: Complete proof with only a minor calculation error in Case 2."
+}}
+</json>
+
+<json>
+{{
+    "response": "Partial: Found the key invariant (sum of squares) and proved it preserves parity, but didn't complete the induction."
+}}
+</json>
+
+<json>
+{{
+    "response": "Incorrect: Only restates the problem and makes trivial observations without any real progress toward the solution."
+}}
+</json>"""
+
+        # Extract prediction from JSON using flexible extraction
+        prediction = "None"
+        try:
+            last_message = msg_history[-1]["text"] if msg_history else ""
+            
+            # PRIORITY 0: Quick check for direct label at the very start of the message
+            # This handles cases where LLM outputs just "Correct" or "Partial: ..." directly
+            quick_label = self._quick_extract_label(last_message)
+            if quick_label != "None":
+                prediction = quick_label
+                self.log_fn(f"Quick extracted prediction: {prediction}")
+                return str(prediction), msg_history
+            
+            # PRIORITY 1: Try JSON extraction first (most reliable)
+            extracted = _extract_json_flexible(last_message)
+            if extracted:
+                # Try to get response from the last JSON object
+                last_json = extracted[-1]
+                if isinstance(last_json, dict):
+                    if "response" in last_json:
+                        response_text = last_json["response"]
+                        # Extract just the label from the response value
+                        prediction = self._extract_label_from_response(response_text)
+                        self.log_fn(f"Extracted label from JSON response field: {prediction}")
+                    else:
+                        # If no "response" key, try to find any string value that looks like a label
+                        found_label = False
+                        for key, value in last_json.items():
+                            if isinstance(value, str):
+                                label = self._extract_label_from_response(value)
+                                if label != "None":
+                                    prediction = label
+                                    found_label = True
+                                    self.log_fn(f"Extracted label from JSON key '{key}': {prediction}")
+                                    break
+                        if not found_label:
+                            # If no label found in values, use the first value as string
+                            if last_json:
+                                first_value = list(last_json.values())[0]
+                                prediction = str(first_value)
+                                self.log_fn(f"Using first JSON value as prediction: {prediction}")
+                            else:
+                                prediction = "None"
+                else:
+                    # If extracted is not a dict, try to use it directly
+                    prediction = str(last_json)
+                    self.log_fn(f"Using non-dict JSON value: {prediction}")
+            else:
+                # PRIORITY 2: Try to extract label directly from the text (fallback)
+                direct_label = self._extract_label(last_message)
+                if direct_label != "None":
+                    prediction = direct_label
+                    self.log_fn(f"Directly extracted prediction from text: {prediction}")
+                else:
+                    self.log_fn(f"Could not extract prediction from text, using None")
+        except Exception as e:
+            self.log_fn(f"Error extracting prediction: {e}")
+            # Fallback: try to extract any of the expected labels from raw text
+            try:
+                last_message = msg_history[-1]["text"] if msg_history else ""
+                prediction = self._extract_label(last_message)
+                self.log_fn(f"Fallback extraction result: {prediction}")
+            except Exception as e2:
+                self.log_fn(f"Fallback extraction also failed: {e2}")
+                prediction = "None"
+
+        return str(prediction), msg_history
+
+    def _extract_label_from_response(self, text: str) -> str:
+        """Extract label from the response value in JSON (strict parsing).
+        
+        This is used when we have a JSON response value like "Partial: The solution..."
+        We want to extract just the label at the start, not from anywhere in the text.
+        
+        Returns one of: "Correct", "Almost", "Partial", "Incorrect", or "None"
+        """
+        if not text:
+            return "None"
+        
+        text_stripped = text.strip()
+        text_lower = text_stripped.lower()
+        
+        # Strategy 1: Look for explicit label at the very start followed by colon or space
+        # This handles "Partial: ..." or "Partial ..." format
+        label_prefix_match = re.match(r'^(correct|almost|partial|incorrect)\b[:\s]', text_lower)
+        if label_prefix_match:
+            return label_prefix_match.group(1).capitalize()
+        
+        # Strategy 2: Look for label at start of any line (for multi-line responses)
+        for line in text_lower.split('\n'):
+            line = line.strip()
+            if line:
+                label_prefix_match = re.match(r'^(correct|almost|partial|incorrect)\b[:\s]', line)
+                if label_prefix_match:
+                    return label_prefix_match.group(1).capitalize()
+        
+        # Strategy 3: Look for label as a standalone word at the very start
+        standalone_match = re.match(r'^(correct|almost|partial|incorrect)\b', text_lower)
+        if standalone_match:
+            return standalone_match.group(1).capitalize()
+        
+        # Strategy 4: Look for label as standalone word at start of any line
+        for line in text_lower.split('\n'):
+            line = line.strip()
+            if line:
+                standalone_match = re.match(r'^(correct|almost|partial|incorrect)\b', line)
+                if standalone_match:
+                    return standalone_match.group(1).capitalize()
+        
+        # Strategy 5: Look for label in quotes anywhere in text
+        quoted_match = re.search(r'["\'](correct|almost|partial|incorrect)["\']', text_lower)
+        if quoted_match:
+            return quoted_match.group(1).capitalize()
+        
+        # Strategy 6: Look for label in parentheses or brackets
+        paren_match = re.search(r'[\(\[](correct|almost|partial|incorrect)[\)\]]', text_lower)
+        if paren_match:
+            return paren_match.group(1).capitalize()
+        
+        # Strategy 7: Look for label in JSON-like format with explicit boundaries
+        json_label_match = re.search(r'["\']?(response|label|classification|grade|evaluation|result)["\']?\s*[:=]\s*["\']?(correct|almost|partial|incorrect)["\']?', text_lower)
+        if json_label_match:
+            return json_label_match.group(2).capitalize()
+        
+        # Strategy 8: Look for label as a complete word (not substring) anywhere in text
+        # This is a fallback - only use if no other patterns matched
+        # Check in order of specificity to avoid confusion
+        # Check for "Almost" first (higher priority to avoid confusion with "correct")
+        almost_match = re.search(r'\balmost\b', text_lower)
+        if almost_match:
+            return "Almost"
+        
+        # Check for "Incorrect" before "Correct" to avoid "inCorrect" issues
+        incorrect_match = re.search(r'\bincorrect\b', text_lower)
+        if incorrect_match:
+            return "Incorrect"
+        
+        # Check for "Partial"
+        partial_match = re.search(r'\bpartial\b', text_lower)
+        if partial_match:
+            return "Partial"
+        
+        # Check for "Correct" last (but not when preceded by "in")
+        correct_match = re.search(r'(?<!in)\bcorrect\b', text_lower)
+        if correct_match:
+            return "Correct"
+        
+        return "None"
+
+    def _quick_extract_label(self, text: str) -> str:
+        """Quickly extract label from the very start of the text.
+        
+        This is the fastest extraction method that checks for labels at the
+        very beginning of the response, before any JSON parsing.
+        
+        Returns one of: "Correct", "Almost", "Partial", "Incorrect", or "None"
+        """
+        if not text:
+            return "None"
+        
+        text_stripped = text.strip()
+        text_lower = text_stripped.lower()
+        
+        # Check for label at the very start followed by colon, space, or word boundary
+        # This handles "Correct: ...", "Partial ...", or just "Correct" at the start
+        match = re.match(r'^(correct|almost|partial|incorrect)\b[:\s]*', text_lower)
+        if match:
+            return match.group(1).capitalize()
+        
+        return "None"
+
+    def _extract_label(self, text: str) -> str:
+        """Extract just the label (Correct/Almost/Partial/Incorrect) from text.
+        
+        This is a more lenient version used for fallback extraction from raw text.
+        
+        Returns one of: "Correct", "Almost", "Partial", "Incorrect", or "None"
+        """
+        if not text:
+            return "None"
+        
+        text_lower = text.lower()
+        
+        # Strategy 1: Look for explicit label at the start of the response
+        label_prefix_match = re.match(r'^(correct|almost|partial|incorrect)[\s:]', text_lower)
+        if label_prefix_match:
+            return label_prefix_match.group(1).capitalize()
+        
+        # Strategy 2: Look for explicit label at the start of any line
+        for line in text_lower.split('\n'):
+            line = line.strip()
+            if line:
+                label_prefix_match = re.match(r'^(correct|almost|partial|incorrect)[\s:]', line)
+                if label_prefix_match:
+                    return label_prefix_match.group(1).capitalize()
+        
+        # Strategy 3: Look for labels as standalone words at the very start
+        standalone_match = re.match(r'^(correct|almost|partial|incorrect)\b', text_lower)
+        if standalone_match:
+            return standalone_match.group(1).capitalize()
+        
+        # Strategy 4: Look for labels as standalone words at the start of any line
+        for line in text_lower.split('\n'):
+            line = line.strip()
+            if line:
+                standalone_match = re.match(r'^(correct|almost|partial|incorrect)\b', line)
+                if standalone_match:
+                    return standalone_match.group(1).capitalize()
+        
+        # Strategy 5: Look for labels in JSON-like format with explicit boundaries
+        json_label_match = re.search(r'["\']?(response|label|classification|grade|evaluation|result)["\']?\s*[:=]\s*["\']?(correct|almost|partial|incorrect)["\']?', text_lower)
+        if json_label_match:
+            return json_label_match.group(2).capitalize()
+        
+        # Strategy 6: Look for labels in parentheses or brackets
+        paren_match = re.search(r'[\(\[](correct|almost|partial|incorrect)[\)\]]', text_lower)
+        if paren_match:
+            return paren_match.group(1).capitalize()
+        
+        # Strategy 7: Look for labels followed by reasoning indicators
+        reasoning_match = re.search(r'\b(correct|almost|partial|incorrect)\s*[-:]\s*', text_lower)
+        if reasoning_match:
+            return reasoning_match.group(1).capitalize()
+        
+        # Strategy 8: Look for labels in quotes
+        quoted_match = re.search(r'["\'](correct|almost|partial|incorrect)["\']', text_lower)
+        if quoted_match:
+            return quoted_match.group(1).capitalize()
+        
+        # Strategy 9: Look for labels as standalone words with word boundaries
+        # Check in order of specificity (most specific first)
+        # Check for "Almost" first (higher priority to avoid confusion with "correct")
+        almost_match = re.search(r'\balmost\b', text_lower)
+        if almost_match:
+            return "Almost"
+        
+        # Check for "Incorrect" before "Correct" to avoid "inCorrect" issues
+        incorrect_match = re.search(r'\bincorrect\b', text_lower)
+        if incorrect_match:
+            return "Incorrect"
+        
+        # Check for "Partial"
+        partial_match = re.search(r'\bpartial\b', text_lower)
+        if partial_match:
+            return "Partial"
+        
+        # Check for "Correct" last (but not when preceded by "in")
+        correct_match = re.search(r'(?<!in)\bcorrect\b', text_lower)
+        if correct_match:
+            return "Correct"
+        
+        return "None"

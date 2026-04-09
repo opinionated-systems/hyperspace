@@ -1,0 +1,8 @@
+{
+  "parent": 107,
+  "forked_from": 107,
+  "valid": true,
+  "train_score": 0.62,
+  "val_score": 0.55,
+  "run_full_eval": true
+}

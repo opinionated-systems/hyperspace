@@ -1,0 +1,345 @@
+"""
+Task agent: solves a given task with chain-of-thought reasoning.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+# Compile regex patterns once for efficiency
+_GRADE_PATTERN = re.compile(r'(?:grade|score|result|answer|assessment|evaluation)[\s:]+([^\n]+)', re.IGNORECASE)
+_JSON_BLOCK_PATTERN = re.compile(r'```(?:json)?\s*\n?(.*?)\n?```', re.DOTALL)
+# Pattern to find JSON-like objects with nested braces (improved for nested structures)
+_JSON_OBJECT_PATTERN = re.compile(r'\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}', re.DOTALL)
+# Pattern to extract content between <json> tags
+_JSON_TAG_PATTERN = re.compile(r'<json>\s*(.*?)\s*</json>', re.DOTALL | re.IGNORECASE)
+# Pattern to find JSON objects with reasoning/response structure
+_JSON_RESPONSE_PATTERN = re.compile(r'\{\s*"(?:reasoning|analysis|explanation)"\s*:[\s\S]*?"(?:response|grade|answer|result)"\s*:[\s\S]*?\}', re.DOTALL | re.IGNORECASE)
+# Pattern to fix common JSON syntax errors (trailing commas, single quotes)
+_JSON_FIX_PATTERN = re.compile(r',\s*([}\]])')
+_SINGLE_QUOTE_PATTERN = re.compile(r"(?<!\\)'([^']*?)(?<!\\)'")
+
+logger = logging.getLogger(__name__)
+
+
+def _fix_json_syntax(json_str: str) -> str:
+    """Fix common JSON syntax errors that LLMs often produce.
+    
+    Fixes:
+    - Trailing commas before closing braces/brackets
+    - Single quotes instead of double quotes
+    - Unescaped newlines in strings
+    """
+    # Fix trailing commas
+    fixed = _JSON_FIX_PATTERN.sub(r'\1', json_str)
+    # Fix single quotes (simple cases only - replace with double quotes)
+    fixed = _SINGLE_QUOTE_PATTERN.sub(r'"\1"', fixed)
+    # Fix unescaped newlines in string values (basic handling)
+    # This is a simplified approach - replace newlines between quotes
+    return fixed
+
+
+def _try_parse_json(json_str: str) -> dict | None:
+    """Try to parse JSON string with automatic syntax fixing.
+    
+    Attempts multiple strategies:
+    1. Direct parsing
+    2. Parsing with syntax fixes
+    3. Extracting the largest valid JSON object
+    """
+    # Strategy 1: Direct parsing
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
+    
+    # Strategy 2: Try with syntax fixes
+    try:
+        fixed = _fix_json_syntax(json_str)
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+    
+    # Strategy 3: Try to find and parse individual JSON objects
+    matches = _JSON_OBJECT_PATTERN.findall(json_str)
+    for match in matches:
+        try:
+            return json.loads(match)
+        except json.JSONDecodeError:
+            # Try with fixes
+            try:
+                fixed = _fix_json_syntax(match)
+                return json.loads(fixed)
+            except json.JSONDecodeError:
+                continue
+    
+    return None
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks with improved robustness.
+
+    Uses multiple extraction strategies:
+    1. Direct <json> tag extraction using regex with syntax fixing
+    2. Markdown code block extraction with syntax fixing
+    3. Raw JSON object detection in text with syntax fixing
+    4. Specific pattern for reasoning/response structure
+    
+    Handles nested braces and common LLM output formatting issues.
+    """
+    results = []
+    
+    # Strategy 1: Extract from <json> tags using regex
+    json_tag_matches = _JSON_TAG_PATTERN.findall(text)
+    for inner in json_tag_matches:
+        inner = inner.strip()
+        parsed = _try_parse_json(inner)
+        if parsed and isinstance(parsed, dict):
+            results.append(parsed)
+            continue
+        
+        # Try to find JSON object within the tag content using brace matching
+        brace_start = inner.find("{")
+        brace_end = inner.rfind("}")
+        if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+            parsed = _try_parse_json(inner[brace_start:brace_end + 1])
+            if parsed and isinstance(parsed, dict):
+                results.append(parsed)
+                continue
+        
+        # Try regex-based extraction for nested braces
+        json_matches = _JSON_OBJECT_PATTERN.findall(inner)
+        for match in json_matches:
+            parsed = _try_parse_json(match)
+            if parsed and isinstance(parsed, dict):
+                results.append(parsed)
+                break  # Take first valid match
+    
+    # Strategy 2: Fallback to markdown code blocks
+    if not results:
+        json_blocks = _JSON_BLOCK_PATTERN.findall(text)
+        for block in json_blocks:
+            block = block.strip()
+            parsed = _try_parse_json(block)
+            if parsed and isinstance(parsed, dict):
+                results.append(parsed)
+                continue
+            
+            # Try to extract JSON objects from within the block
+            json_matches = _JSON_OBJECT_PATTERN.findall(block)
+            for match in json_matches:
+                parsed = _try_parse_json(match)
+                if parsed and isinstance(parsed, dict):
+                    results.append(parsed)
+                    break
+    
+    # Strategy 3: Search entire text for JSON objects with reasoning/response structure
+    if not results:
+        response_matches = _JSON_RESPONSE_PATTERN.findall(text)
+        for match in response_matches:
+            parsed = _try_parse_json(match)
+            if parsed and isinstance(parsed, dict) and ("response" in parsed or "reasoning" in parsed):
+                results.append(parsed)
+    
+    # Strategy 4: General JSON object search as last resort
+    if not results:
+        json_matches = _JSON_OBJECT_PATTERN.findall(text)
+        for match in json_matches:
+            parsed = _try_parse_json(match)
+            if parsed and isinstance(parsed, dict) and ("response" in parsed or "reasoning" in parsed):
+                results.append(parsed)
+    
+    return results if results else None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems with chain-of-thought reasoning."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem with chain-of-thought reasoning.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract fields for better prompting
+        domain = inputs.get("domain", "Mathematics")
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+
+        instruction = f"""You are an expert {domain} grader evaluating student solutions with precision and fairness.
+
+Your task is to grade a student's answer by systematically comparing it against the official solution and applying the grading guidelines rigorously.
+
+## Problem Statement:
+{problem}
+
+## Official Solution:
+{solution}
+
+## Grading Guidelines:
+{grading_guidelines}
+
+## Student's Answer:
+{student_answer}
+
+## Grading Instructions:
+Follow this structured approach:
+
+1. **Understanding Check**: Verify you understand the problem, official solution, and what constitutes a correct answer.
+
+2. **Step-by-Step Analysis**: 
+   - Break down the official solution into key steps/concepts
+   - Map the student's answer to these steps
+   - Identify what the student got right (concepts, methods, calculations)
+   - Identify errors (conceptual mistakes, calculation errors, missing steps)
+
+3. **Error Classification**:
+   - Minor error: Small calculation mistake but correct approach
+   - Major error: Wrong method or missing critical concept
+   - Complete: All steps correct with proper justification
+
+4. **Grade Determination**: Based on the guidelines, assign an appropriate grade.
+
+## Response Format (STRICT):
+You MUST respond ONLY with a JSON object wrapped in <json>...</json> tags. Use this exact schema:
+
+<json>
+{{
+    "reasoning": "Detailed analysis covering: (1) understanding of problem, (2) comparison with official solution, (3) specific errors found, (4) justification for the grade",
+    "response": "The final grade - use exact terms from guidelines or standard grades like 'Correct', 'Partially Correct', 'Incorrect'"
+}}
+</json>
+
+## Example Responses:
+
+Example 1 - Correct:
+<json>
+{{
+    "reasoning": "The student demonstrated complete understanding of the problem. All steps match the official solution: correctly applied the quadratic formula, showed all work, and arrived at the correct roots. The reasoning is clear and mathematically sound.",
+    "response": "Correct"
+}}
+</json>
+
+Example 2 - Partially Correct:
+<json>
+{{
+    "reasoning": "The student used the correct method (integration by parts) and set up the problem correctly. However, there is a sign error in the final calculation (should be -1/2, not +1/2). This is a minor calculation error with correct conceptual understanding.",
+    "response": "Partially Correct"
+}}
+</json>
+
+Example 3 - Incorrect:
+<json>
+{{
+    "reasoning": "The student fundamentally misunderstood the problem. They attempted to use the Pythagorean theorem on a non-right triangle and made no attempt to apply the law of cosines as required. The approach is incorrect for this problem type.",
+    "response": "Incorrect"
+}}
+</json>
+
+## Critical Requirements:
+- Response MUST start with <json> and end with </json>
+- JSON must be valid with no syntax errors
+- Both "reasoning" and "response" fields are REQUIRED
+- Do not include ANY text outside the JSON tags
+- Be objective and consistent with the official solution
+- Consider partial credit when guidelines allow it
+
+Provide your assessment now."""
+
+        response, msg_history, info = get_response_from_llm(
+            msg=instruction,
+            model=self.model,
+            msg_history=[],
+        )
+
+        # Extract prediction from JSON
+        prediction = "None"
+        reasoning = ""
+        response_text = msg_history[-1]["text"]
+        
+        try:
+            extracted = _extract_jsons(response_text)
+            if extracted:
+                self.log_fn(f"Successfully extracted {len(extracted)} JSON object(s) from response")
+                # Use the last valid JSON object (most likely to be the final answer)
+                last_json = extracted[-1]
+                
+                # Try multiple possible keys for the response (ordered by priority)
+                response_keys = ["response", "grade", "answer", "result", "assessment", "evaluation", 
+                               "score", "verdict", "conclusion", "decision", "output", "final_grade"]
+                for key in response_keys:
+                    if key in last_json and last_json[key] is not None:
+                        prediction = str(last_json[key]).strip()
+                        break
+                
+                # Log reasoning if available
+                reasoning_keys = ["reasoning", "analysis", "explanation", "thought", "thinking", 
+                               "rationale", "justification", "notes", "commentary", "evaluation_details"]
+                for key in reasoning_keys:
+                    if key in last_json and last_json[key]:
+                        reasoning = last_json[key]
+                        self.log_fn(f"Reasoning ({key}): {str(reasoning)[:200]}...")
+                        break
+                
+                self.log_fn(f"Extracted prediction from JSON: {prediction}")
+            else:
+                # Fallback: try to extract any meaningful text from the response
+                # Look for common patterns like "Grade: X" or "Answer: X"
+                grade_match = _GRADE_PATTERN.search(response_text)
+                if grade_match:
+                    prediction = grade_match.group(1).strip()
+                    self.log_fn(f"Extracted grade via pattern matching: {prediction}")
+                else:
+                    # Try to find standalone grades with priority ordering
+                    # More specific matches should be checked first
+                    grade_keywords_priority = [
+                        ("Partially Correct", ["partially correct"]),
+                        ("Correct", ["correct", "full credit", "full marks", "excellent"]),
+                        ("Incorrect", ["incorrect", "wrong", "no credit", "fail", "poor"]),
+                        ("Partial", ["partial"]),
+                        ("Pass", ["pass"]),
+                    ]
+                    text_lower = response_text.lower()
+                    for grade, keywords in grade_keywords_priority:
+                        if any(kw in text_lower for kw in keywords):
+                            prediction = grade
+                            self.log_fn(f"Extracted grade via keyword: {prediction}")
+                            break
+        except Exception as e:
+            self.log_fn(f"Error extracting prediction: {e}")
+            # Last resort: check if response contains any recognizable grade
+            try:
+                text_lower = response_text.lower()
+                # Check for "partially correct" first (more specific)
+                if "partially correct" in text_lower:
+                    prediction = "Partially Correct"
+                elif "partial" in text_lower:
+                    prediction = "Partially Correct"
+                elif "correct" in text_lower and "incorrect" not in text_lower:
+                    prediction = "Correct"
+                elif "incorrect" in text_lower or "wrong" in text_lower:
+                    prediction = "Incorrect"
+            except:
+                pass
+
+        return str(prediction), msg_history

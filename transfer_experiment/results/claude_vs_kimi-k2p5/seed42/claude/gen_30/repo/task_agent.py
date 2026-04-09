@@ -1,0 +1,1890 @@
+"""
+Task agent: solves a given task with a single LLM call (plus optional
+verification passes for borderline grades).
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+# Valid grade labels (output space).
+# "almost" is a distinct 4th label used by the eval harness (worth 6/7 points).
+# It applies when the student's answer satisfies an "(Almost)" criterion in the
+# grading guidelines — essentially complete but with minor, non-negligible gaps.
+_VALID_GRADES = {"correct", "almost", "partial", "incorrect"}
+
+# Grades where a verification pass is worthwhile (borderline decisions).
+# "correct"   -> verify whether any "(Almost)" criterion actually applies
+#                (most common error: awarding "correct" when "almost" is right).
+#             -> ALSO verify whether "correct" should be downgraded to "partial"
+#                (second most common error: awarding "correct" for a partial answer,
+#                 costs 6 pts per error — the most costly systematic mistake).
+# "incorrect" -> verify whether any "(Partial)" criterion was missed
+#                (second most common error: missing partial credit).
+# "almost"    -> verify whether "almost" is truly warranted vs "partial"/"incorrect"
+#                (over-predicting "almost" is very costly: 5/7 pts penalty per error).
+# "partial"   -> verify whether "partial" is truly warranted vs "incorrect"
+#                (false partial for true-incorrect is a common error: 1 pt awarded
+#                 for a worthless answer).  Also verify whether "correct" applies
+#                 (under-grading a complete solution as partial is costly: 6 pts lost).
+# NOTE: "partial" is intentionally NOT verified for upgrade to "almost".
+#       Empirical data shows partial->almost upgrades cause far more false positives
+#       (5/7 pt penalty each) than they correct.  "almost" is only ~5% of answers.
+_VERIFY_GRADES = {"incorrect", "correct", "almost", "partial"}
+
+# Expected base rates for calibration (from empirical data):
+# correct ~35%, incorrect ~35%, partial ~25%, almost ~5%
+_BASE_RATES = {"correct": 0.35, "almost": 0.05, "partial": 0.25, "incorrect": 0.35}
+
+# Empirical precision of "almost" predictions across many grading runs: ~4%.
+# This means that when the model predicts "almost", it is wrong ~96% of the time.
+# The verification pass for "almost" is therefore extremely aggressive.
+_ALMOST_EMPIRICAL_PRECISION = 0.04
+
+# Empirical observation: predicting "correct" for a "partial" answer is the
+# MOST COSTLY systematic error (6 pts per occurrence).  The first-pass grader
+# frequently awards "correct" to answers that only satisfy a "(Partial)" criterion
+# because the student's write-up is long, confident, and covers the right topic.
+# A dedicated "correct->partial" downgrade pass is therefore warranted.
+_CORRECT_OVERGRADE_IS_MOST_COSTLY = True
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses str.find to locate outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    """
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            continue
+    return results or None
+
+
+def _extract_grade_fallback(text: str) -> str | None:
+    """Fallback: scan the text for a bare grade keyword.
+
+    Looks for lines like 'Grade: almost' or a standalone grade word
+    near the end of the response, in case the model forgot the JSON tags.
+    """
+    # Try labelled patterns first: "grade: almost", "verdict: partial", etc.
+    labelled = re.search(
+        r'(?:grade|verdict|assessment|result)\s*[:\-]\s*(correct|almost|partial|incorrect)',
+        text,
+        re.IGNORECASE,
+    )
+    if labelled:
+        return labelled.group(1).lower()
+
+    # Try a bare JSON-like fragment without tags: {"response": "almost"}
+    bare_json = re.search(
+        r'\{[^{}]*"response"\s*:\s*"(correct|almost|partial|incorrect)"[^{}]*\}',
+        text,
+        re.IGNORECASE,
+    )
+    if bare_json:
+        return bare_json.group(1).lower()
+
+    # Last resort: find the last occurrence of a valid grade word as a
+    # standalone token (surrounded by non-word characters or string boundaries).
+    # Check "almost" before "correct" so it is not shadowed.
+    matches = list(re.finditer(r'\b(correct|almost|partial|incorrect)\b', text, re.IGNORECASE))
+    if matches:
+        return matches[-1].group(1).lower()
+
+    return None
+
+
+def _get_assistant_text(msg_history: list[dict], response: str) -> str:
+    """Robustly extract the assistant's text from the message history.
+
+    Different LLM client implementations store the assistant reply under
+    different keys ("content", "text").  Try both before falling back to
+    the raw ``response`` string.
+    """
+    if not msg_history:
+        return response or ""
+    last = msg_history[-1]
+    # Standard OpenAI-style key
+    if isinstance(last.get("content"), str):
+        return last["content"]
+    # Some clients use "text"
+    if isinstance(last.get("text"), str):
+        return last["text"]
+    # content may be a list of content blocks (e.g. Anthropic)
+    if isinstance(last.get("content"), list):
+        parts = []
+        for block in last["content"]:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+        if parts:
+            return "\n".join(parts)
+    return response or ""
+
+
+class TaskAgent:
+    """Task agent that grades IMO-style competition problems."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_file = log_file
+        self.log_fn = logger.info
+
+    # ---------------------------------------------------------------------- #
+    # Prompt construction                                                      #
+    # ---------------------------------------------------------------------- #
+
+    def _build_instruction(
+        self,
+        problem: str,
+        official_solution: str,
+        grading_guidelines: str,
+        student_answer: str,
+    ) -> str:
+        """Return the grading prompt."""
+        return f"""You are an expert mathematics competition grader.
+Your task is to evaluate a student's answer to a competition problem and assign
+one of FOUR grades: "correct", "almost", "partial", or "incorrect".
+
+================================================================
+SCORING CONTEXT  (read this first -- it shapes every decision)
+================================================================
+
+The four grades map to point values:
+  "correct"   -> 7 points   (fully correct; every essential step present and sound)
+  "almost"    -> 6 points   (essentially complete; satisfies an "(Almost)" criterion)
+  "partial"   -> 1 point    (genuine non-trivial progress; satisfies a "(Partial)" criterion)
+  "incorrect" -> 0 points   (wrong, circular, or no meaningful progress)
+
+EXPECTED BASE RATES (use as a calibration prior):
+  Roughly 35% of answers are "correct", 35% are "incorrect",
+  25% are "partial", and only 5% are "almost".
+  "almost" is VERY RARE -- only ~1 in 20 answers.  Be extremely conservative.
+  If you find yourself assigning "incorrect" to more than half the
+  answers you grade, you are likely being too strict on "partial".
+  CALIBRATION CHECK: If you are about to assign "incorrect", pause and
+  re-read every "(Partial)" criterion one more time.  Partial credit is
+  awarded to ~25% of answers; missing it is the most common grading error.
+
+CRITICAL WARNING ABOUT "almost" -- READ CAREFULLY:
+  "almost" (6 pts) is the MOST DANGEROUS grade to award incorrectly.
+  Awarding "almost" to an answer that is actually "incorrect" (0 pts) or
+  "partial" (1 pt) costs 6 or 5 points respectively -- a catastrophic error.
+  By contrast, awarding "correct" (7 pts) to an "almost" answer costs only 1 pt.
+  THEREFORE: When in doubt between "almost" and a lower grade, ALWAYS choose
+  the lower grade.  Only award "almost" when you are CERTAIN the answer is
+  genuinely near-complete with the correct approach and only minor gaps.
+
+  EMPIRICAL FACT: In practice, "almost" predictions are correct only ~4% of
+  the time.  This means that if you are considering "almost", the probability
+  that you are WRONG is approximately 96%.  The default must be "partial".
+  Do NOT award "almost" unless you have overwhelming, unambiguous evidence.
+
+  STRICT REQUIREMENTS for "almost" -- ALL must be true:
+    (A) The student's overall approach is CORRECT (not just plausible).
+    (B) The solution is GENUINELY NEAR-COMPLETE (not just long or detailed).
+    (C) The mistakes are TRULY MINOR (not fundamental errors or wrong conclusions).
+    (D) The answer EXPLICITLY satisfies a specific "(Almost)" criterion in the
+        grading guidelines -- quote the exact passage as evidence.
+  If ANY of (A)-(D) fails, do NOT award "almost".
+
+  ADDITIONAL SAFEGUARD: Before awarding "almost", ask yourself:
+    "If I had to bet 5 points on this being 'almost' rather than 'partial',
+     would I take that bet?"  If not, choose "partial".
+
+  SPECIAL RULE for "omitted the case" or "almost complete" criteria:
+    If an "(Almost)" criterion says "Omitted the case when X" or "Solution is
+    almost complete, but omitted [sub-case]", it applies ONLY when the student
+    uses the SAME overall approach as the official solution AND has completed
+    essentially ALL of the proof except the named omission.  A student who uses
+    a DIFFERENT approach entirely does NOT satisfy such a criterion, even if
+    their answer is long and detailed.  The criterion describes a student who
+    was on the right track and nearly finished -- not one who took a different
+    path and got stuck.
+
+The grading guidelines list "(Almost)" and "(Partial)" criteria.
+Their intended meanings are:
+
+  "(Almost)" criterion -- the student's answer is essentially complete but
+    has minor, non-negligible gaps or mistakes that prevent a full 7 points.
+    An answer satisfying an "(Almost)" criterion earns "almost" (6 pts),
+    NOT "correct" (7 pts).  The gap between "almost" and "correct" is real.
+
+  "(Partial)" criterion -- the student made genuine, non-trivial progress on
+    a specific sub-task but did not come close to a full solution.
+    An answer satisfying a "(Partial)" criterion (but no "(Almost)" criterion)
+    earns "partial" (1 pt).
+
+================================================================
+GRADE DEFINITIONS
+================================================================
+
+"correct"  (7 pts)
+  Every essential logical step is present and sound AND the student
+  reaches the correct final conclusion with no significant mathematical
+  gap.  Minor presentational or notational differences are acceptable,
+  but there must be no mathematical gap of any significance.
+  RULE: Award "correct" ONLY when the solution is genuinely complete.
+  Do NOT award "correct" if the student satisfies an "(Almost)"
+    criterion -- that earns "almost", not "correct".
+  Do NOT award "correct" if the student only proves part of what is
+    required (e.g., proves necessary conditions but not sufficiency,
+    or proves one direction of an iff but not the other, or handles
+    some cases but not all).
+
+"almost"  (6 pts)
+  The student's answer is essentially complete but has minor,
+  non-negligible gaps or mistakes -- it satisfies at least one
+  "(Almost)" criterion in the grading guidelines.
+  RULE: If the student's answer satisfies ANY "(Almost)" criterion,
+    the grade MUST be "almost".  STOP -- do not check further.
+  Do NOT conflate "almost" with "correct": the gap is real and
+    intentional.  An "(Almost)" answer is not fully correct.
+  Do NOT award "almost" unless the answer is genuinely near-complete.
+    A long but fundamentally flawed answer that merely mentions a related
+    idea does NOT satisfy an "(Almost)" criterion.
+  CRITICAL: An answer that reaches a WRONG final conclusion, or uses
+    a fundamentally incorrect approach, is NOT "almost" -- it is
+    "incorrect" or at most "partial".  "Almost" requires the student
+    to be on the RIGHT track with only minor gaps remaining.
+  When the "(Almost)" criterion says "Solution is almost complete,
+    but made minor mistakes which are not negligible", this means the
+    student must have a CORRECT overall approach and a NEARLY COMPLETE
+    proof -- not just a long attempt.  Verify the approach is correct
+    before awarding "almost".
+  REMEMBER: "almost" is only ~5% of answers.  If you are considering
+    "almost", ask yourself: "Is this answer truly 85%+ complete with
+    the right approach?"  If not, choose "partial" or "incorrect".
+  FINAL SAFEGUARD: "almost" predictions are empirically correct only
+    ~4% of the time.  If you are considering "almost", you are almost
+    certainly wrong.  Choose "partial" unless the evidence is overwhelming.
+
+"partial"  (1 pt)
+  The student makes genuine, non-trivial mathematical progress but the
+  answer is substantially incomplete or contains significant errors.
+  Award "partial" when the student's answer EXPLICITLY and VERIFIABLY
+  satisfies AT LEAST ONE "(Partial)" criterion listed in the grading
+  guidelines.
+  GENEROUS STANDARD: Credit the student if the mathematical substance
+    of a "(Partial)" criterion is present anywhere in their answer --
+    even if the write-up is informal, uses different notation, or the
+    criterion is reached as a by-product of a larger (failed) argument.
+  A long, detailed attempt that contains the key sub-result of a
+    "(Partial)" criterion DOES earn "partial", even if the overall
+    solution is wrong.
+  If the student introduces the exact object, substitution, or
+    construction named in a "(Partial)" criterion (e.g. "considered a
+    prime p | xy+1"), that criterion is satisfied even if they do not
+    complete the argument from there.
+  If the student GUESSES the correct answer or identifies the correct
+    key objects/values named in a "(Partial)" criterion, that counts
+    even without a full proof, provided the criterion does not
+    explicitly require a proof.
+  Do NOT award "partial" based on vague similarity to a criterion,
+    general mathematical knowledge, or a long but ultimately flawed
+    argument that never reaches the criterion's specific conclusion.
+  An answer that satisfies an "(Almost)" criterion is "almost",
+    not "partial".
+  IMPORTANT: A student who merely MENTIONS a concept without actually
+    establishing the required mathematical fact does NOT satisfy a
+    "(Partial)" criterion.  The criterion requires the specific
+    mathematical substance to be present, not just the terminology.
+
+"incorrect"  (0 pts)
+  The student's answer is wrong, fundamentally flawed, or makes no
+  meaningful progress toward the solution.  This includes:
+  - Arriving at a clearly wrong conclusion.
+  - Circular reasoning or merely restating the problem.
+  - A plausible-sounding narrative with no real mathematical substance.
+  - A valid approach with a critical error so early that no useful
+    progress is made.
+  - An answer that does NOT explicitly satisfy any "(Partial)" or
+    "(Almost)" criterion in the grading guidelines.
+  A long, detailed, or confident-sounding answer is NOT evidence of
+    partial credit.  Only explicit criterion matches count.
+  However, do NOT default to "incorrect" without carefully checking
+    every "(Partial)" criterion.  Partial credit is common (~25% of
+    answers); missing it is a frequent grading error.
+  BEFORE CHOOSING "incorrect": Re-read every single "(Partial)"
+    criterion one more time.  For each one, ask: "Is there ANY passage
+    in the student's answer that establishes this specific fact, even
+    informally or as part of a failed larger argument?"  Only if the
+    answer is definitively NO for every criterion should you choose
+    "incorrect".
+
+  PARTIAL CREDIT STANDARD -- be generous about what counts:
+    The student must ESTABLISH the specific mathematical fact named in
+    the criterion, not merely mention related concepts or use similar
+    terminology.  However, "establish" includes:
+    - Deriving the fact as part of a larger (failed) argument.
+    - Stating the fact and providing a sketch that makes it plausible.
+    - Introducing the exact object/construction named in the criterion.
+    - Correctly identifying the answer/value named in the criterion.
+    Ask: "Has the student actually engaged with the specific
+    mathematical object/fact named in the criterion?"  If yes, credit it.
+
+================================================================
+DECISION PROCEDURE  (follow steps in order; stop at first match)
+================================================================
+
+STEP 1 -- CORRECT CHECK
+  a. Are ALL essential logical steps present and sound?
+  b. Does the student reach the correct final conclusion with no
+     significant mathematical gap?
+  c. Does the student prove BOTH directions if the problem requires it
+     (e.g., necessary AND sufficient conditions, all cases)?
+  -> ALL YES -> BEFORE marking "correct", run the CORRECT GATE below.
+  -> OTHERWISE -> continue to Step 2.
+
+  CORRECT GATE (mandatory before awarding "correct"):
+    Ask yourself: "Is there a SPECIFIC, IDENTIFIABLE gap in this solution?"
+    - Does the student address EVERY case and sub-case?
+    - Is the final answer/conclusion explicitly stated and right?
+    - Does ANY "(Almost)" criterion in the guidelines apply?
+      If yes -> grade is "almost", NOT "correct".
+    - Does the student's answer go BEYOND all "(Partial)" criteria?
+      If the student only satisfies a "(Partial)" criterion and does NOT
+      complete the full proof -> grade is "partial", NOT "correct".
+    - IMPORTANT: Do NOT invent gaps.  If the solution is complete and
+      reaches the correct conclusion, award "correct" even if terse.
+      Only downgrade if there is a SPECIFIC, IDENTIFIABLE missing step.
+    Only if ALL checks pass -> grade is "correct".
+
+STEP 2 -- ALMOST CHECK
+  Read every "(Almost)" criterion in the grading guidelines verbatim.
+  For each criterion, ask: does the student's answer EXPLICITLY satisfy
+  it?  Quote the specific passage as evidence.
+  CRITICAL TESTS for "almost" -- ALL must pass:
+    (i)  Is the student's overall approach CORRECT (not just plausible)?
+    (ii) Is the solution GENUINELY NEAR-COMPLETE (not just long)?
+    (iii) Are the mistakes truly MINOR (not fundamental errors)?
+    (iv) Does the student reach the CORRECT final conclusion (or come
+         within one minor step of it)?
+  If the criterion says "minor mistakes only" or "almost complete",
+  verify that the student has the right strategy and is close to done.
+  An answer that is long and detailed but uses a WRONG approach or
+  reaches a WRONG conclusion does NOT satisfy an "almost" criterion.
+  SPECIAL CHECK for "omitted the case" or "almost complete" criteria:
+    If the criterion says "Omitted the case when X" or "Solution is
+    almost complete, but omitted [sub-case]", it applies ONLY when the
+    student uses the SAME overall approach as the official solution AND
+    has completed essentially ALL of the proof except the named omission.
+    A student who uses a DIFFERENT approach entirely does NOT satisfy
+    such a criterion, even if their answer is long and detailed.
+  DEFAULT RULE: If you are uncertain whether "almost" applies, choose
+  "partial" instead.  The cost of a false "almost" is very high.
+  EMPIRICAL REMINDER: "almost" predictions are correct only ~4% of the
+  time.  If you are considering "almost", you are almost certainly wrong.
+  -> ALL TESTS PASS for any criterion -> grade is "almost".  STOP.
+  -> NONE satisfied          -> continue to Step 3.
+
+STEP 3 -- PARTIAL CHECK  <- THIS STEP IS CRITICAL; DO NOT SKIP IT
+  *** THIS IS THE MOST COMMONLY MISSED STEP -- BE THOROUGH ***
+  Read every "(Partial)" criterion in the grading guidelines verbatim.
+  For EACH criterion, perform this two-part test:
+    (a) What specific mathematical object, fact, or step does this
+        criterion require?  State it precisely.
+    (b) Search the student's answer carefully.  Does the student
+        establish that object/fact/step ANYWHERE -- even informally,
+        even as a lemma, even as part of a larger failed argument?
+        Quote the specific passage.
+  Apply a GENEROUS standard: if the mathematical substance is present,
+  credit it.  Do not penalise informal presentation or notation.
+  IMPORTANT: Even if the student's overall solution is completely wrong,
+  they may still satisfy a partial criterion for a specific sub-result.
+  Check EVERY criterion independently of the overall solution quality.
+  -> ANY criterion substantively satisfied -> grade is "partial".  STOP.
+  -> NONE satisfied after checking ALL criteria -> grade is "incorrect".
+
+================================================================
+COMMON GRADING MISTAKES TO AVOID
+================================================================
+
+MISTAKE 1 -- Awarding "correct" when the solution is incomplete:
+  If the student proves necessary conditions but not sufficiency (or
+  vice versa), or proves one case but not all cases, the grade is NOT
+  "correct".  Check whether the student addresses ALL parts of the
+  problem.
+
+MISTAKE 2 -- Awarding "almost" for a fundamentally wrong answer:
+  A long, detailed answer that uses the wrong approach or reaches the
+  wrong conclusion is NOT "almost".  "Almost" requires the student to
+  be on the right track.  If the student's final answer or key claim
+  is wrong, default to "partial" or "incorrect".
+
+MISTAKE 3 -- Missing "partial" credit (THE MOST COMMON MISTAKE):
+  Carefully check EVERY "(Partial)" criterion.  A student who
+  establishes even one specific sub-result deserves "partial".
+  Do not skip this step even if the overall solution is wrong.
+  Do not require the student to have a complete or correct solution
+  to earn partial credit -- partial credit is for sub-results only.
+
+MISTAKE 4 -- Awarding "partial" for vague similarity:
+  The student must establish the SPECIFIC mathematical fact named in
+  the criterion, not just something vaguely related.
+
+MISTAKE 5 -- Awarding "correct" when an "(Almost)" criterion applies:
+  Before finalising "correct", explicitly verify that NONE of the
+  "(Almost)" criteria in the grading guidelines are satisfied.  If
+  even one applies, the grade must be "almost", not "correct".
+
+MISTAKE 6 -- Awarding "correct" for a plausible but gapped proof:
+  A confident, well-written answer that skips a key step or handles
+  only some cases is NOT "correct".  The standard is strict: every
+  essential step must be present and sound.
+  HOWEVER: Do not invent gaps that are not there.  If a step is
+  standard or follows immediately from what the student wrote, do not
+  penalise the student for not spelling it out in full detail.
+  A well-structured proof that covers all the required cases and
+  reaches the correct conclusion should be awarded "correct" even if
+  it is not written at the level of a textbook proof.
+
+MISTAKE 7 -- Over-awarding "almost" (THE MOST COSTLY MISTAKE):
+  "almost" is only ~5% of answers.  Awarding "almost" to an answer
+  that is actually "incorrect" or "partial" is a catastrophic error
+  (costs 5-6 points).  When in doubt, choose "partial" over "almost".
+  Only award "almost" when you are CERTAIN the answer is genuinely
+  near-complete with the correct approach.
+  EMPIRICAL REMINDER: "almost" predictions are correct only ~4% of the
+  time.  If you are considering "almost", you are almost certainly wrong.
+
+MISTAKE 8 -- Downgrading "correct" to "incorrect" for invented gaps:
+  Do not penalise a student for omitting steps that are trivially
+  implied by what they wrote, or for using a valid approach that
+  differs from the official solution.  If the student's argument is
+  logically sound and reaches the correct conclusion, award "correct"
+  even if the presentation is terse or uses different notation.
+
+MISTAKE 9 -- Skipping partial check because the solution looks wrong:
+  Even if the student's overall approach is completely wrong, they may
+  still satisfy a "(Partial)" criterion for a specific sub-result.
+  ALWAYS check every partial criterion, regardless of overall quality.
+
+MISTAKE 10 -- Awarding "correct" when the student only satisfies a "(Partial)" criterion:
+  A student's answer can be long, detailed, confident, and mathematically
+  sophisticated while only establishing a sub-result named in a "(Partial)"
+  criterion.  Such an answer earns "partial" (1 pt), NOT "correct" (7 pts).
+  BEFORE awarding "correct", explicitly verify:
+    (a) Does the student's answer go BEYOND all "(Partial)" criteria?
+    (b) Does the student actually COMPLETE the full proof, not just a sub-task?
+    (c) Does the student reach the CORRECT FINAL ANSWER/CONCLUSION?
+  If the student's answer only satisfies a "(Partial)" criterion and does not
+  complete the full proof, the grade MUST be "partial", not "correct".
+  A well-written partial solution is still only worth 1 point.
+  HOWEVER: Do not invent incompleteness.  If the student's answer is genuinely
+  complete and reaches the correct conclusion, award "correct" even if the
+  write-up is terse.  A complete solution that is informally presented is still
+  "correct".  Only downgrade if there is a SPECIFIC, IDENTIFIABLE missing step.
+
+================================================================
+PROBLEM
+================================================================
+{problem}
+
+================================================================
+OFFICIAL SOLUTION
+================================================================
+{official_solution}
+
+================================================================
+GRADING GUIDELINES
+================================================================
+{grading_guidelines}
+
+================================================================
+STUDENT'S ANSWER
+================================================================
+{student_answer}
+
+================================================================
+GRADING INSTRUCTIONS
+================================================================
+Step 1. Read the problem and official solution carefully to understand
+        what a complete proof requires.  List every essential component
+        a complete solution must contain.
+Step 2. List every "(Almost)" criterion and every "(Partial)" criterion
+        from the grading guidelines verbatim.
+Step 3. Follow the DECISION PROCEDURE above (Steps 1 -> 2 -> 3).
+        For each criterion you check, quote the specific passage from
+        the student's answer that supports or refutes a match.
+        For "(Partial)" criteria, be generous: if the student has
+        established the mathematical substance of the criterion anywhere
+        in their answer (even as a lemma or intermediate step in a
+        larger failed argument), that counts.
+        For "(Almost)" criteria, be strict: the answer must be
+        genuinely near-complete with the correct approach, not merely
+        long or detailed.
+Step 4. Before finalising "correct", run the CORRECT GATE:
+        (a) Verify the student addresses ALL required parts of the
+            problem (both directions of iff, all cases, etc.).
+        (b) Explicitly check whether ANY "(Almost)" criterion applies.
+            If yes, the grade is "almost", not "correct".
+        (c) Ask: "Is there a SPECIFIC, IDENTIFIABLE gap?" If yes, downgrade.
+            Do NOT downgrade for vague concerns or terse presentation.
+        (d) Does the student's answer go BEYOND all "(Partial)" criteria?
+            If the student only satisfies a "(Partial)" criterion and does
+            NOT complete the full proof, the grade is "partial", NOT "correct".
+            A long, detailed, confident answer that only establishes a
+            sub-result earns "partial" (1 pt), not "correct" (7 pts).
+            HOWEVER: Do not invent incompleteness.  If the solution is
+            genuinely complete, award "correct" even if informally written.
+Step 5. Before finalising "almost", verify ALL four conditions:
+        (a) The student's approach is CORRECT (not just plausible).
+        (b) The solution is GENUINELY NEAR-COMPLETE (not just long).
+        (c) The mistakes are TRULY MINOR (not fundamental errors).
+        (d) The student reaches the correct conclusion or is within
+            one minor step of it.
+        SPECIAL CHECK: If the "(Almost)" criterion mentions "omitted the
+        case when X" or "almost complete but omitted [sub-case]", also
+        verify that the student uses the SAME approach as the official
+        solution.  If the student uses a different approach, the criterion
+        is NOT satisfied regardless of how long or detailed the answer is.
+        If ANY condition fails, choose "partial" or "incorrect" instead.
+        REMEMBER: "almost" is only ~5% of answers.  Be very conservative.
+        EMPIRICAL REMINDER: "almost" predictions are correct only ~4% of
+        the time.  If you are considering "almost", you are almost
+        certainly wrong.  Choose "partial" unless the evidence is
+        overwhelming and unambiguous.
+Step 6. *** MANDATORY PARTIAL SCAN -- DO NOT SKIP ***
+        Before finalising ANY grade other than "partial", explicitly
+        go through EACH "(Partial)" criterion one by one:
+        For each criterion:
+          (a) State what specific fact/object/step it requires.
+          (b) Search the student's answer for ANY passage that
+              establishes this fact, even informally.
+          (c) Quote the passage if found; write "not found" if absent.
+        If ANY criterion is satisfied -> grade is "partial".
+        Only if ALL criteria are definitively not satisfied -> proceed
+        with your original grade.
+Step 7. State your final grade and write it in the JSON block below.
+
+Output your final answer as a JSON object enclosed in <json> tags.
+The "response" field MUST be exactly one of: "correct", "almost",
+"partial", or "incorrect" (lowercase, no quotes around the value in JSON).
+
+Example A -- answer is fully complete -> "correct":
+<json>
+{{{{
+    "essential_components": ["Prove the invariant mod 4.", "Show all pairs satisfying the invariant are reachable."],
+    "almost_criteria": ["Applied infinite descent but did not complete the final step."],
+    "partial_criteria": ["Proved c >= 3.", "Identified the mod-4 invariant."],
+    "step1_correct": "All essential steps are present and the student reaches the correct conclusion with no gap.",
+    "correct_gate": "No Almost criterion applies. All cases covered. No gap found. Student goes BEYOND all Partial criteria: they not only proved c >= 3 and identified the mod-4 invariant, but also completed the full proof of reachability.",
+    "partial_scan": "Criterion 1 (Proved c >= 3): Student proved c >= 3 explicitly. Criterion 2 (mod-4 invariant): Student identified and used the mod-4 invariant. Both satisfied, but solution is complete so grade is correct.",
+    "reasoning": "Solution is complete and goes beyond all partial criteria; grade is correct.",
+    "response": "correct"
+}}}}
+</json>
+
+Example B -- answer meets an "(Almost)" criterion -> "almost":
+<json>
+{{{{
+    "essential_components": ["Prove the invariant mod 4.", "Show all pairs satisfying the invariant are reachable."],
+    "almost_criteria": ["Applied infinite descent but did not complete the final step."],
+    "partial_criteria": ["Proved c >= 3.", "Identified the mod-4 invariant."],
+    "step1_correct": "Answer is not fully complete -- missing the final step.",
+    "step2_almost": "Student applied infinite descent (matches Almost criterion 1). Approach is correct and solution is near-complete. All four conditions verified. Grade: almost.",
+    "partial_scan": "Criterion 1 satisfied, but Almost criterion also satisfied so grade is almost.",
+    "reasoning": "Student's answer satisfies Almost criterion 1; grade is almost.",
+    "response": "almost"
+}}}}
+</json>
+
+Example C -- answer meets a "(Partial)" criterion only -> "partial":
+<json>
+{{{{
+    "essential_components": ["Prove the invariant mod 4.", "Show all pairs satisfying the invariant are reachable."],
+    "almost_criteria": ["Applied infinite descent but did not complete the final step."],
+    "partial_criteria": ["Proved c >= 3.", "Identified the mod-4 invariant."],
+    "step1_correct": "Answer is incomplete -- does not reach the final conclusion.",
+    "step2_almost": "No Almost criterion is satisfied -- the answer is not near-complete.",
+    "partial_scan": "Criterion 1 (Proved c >= 3): Student wrote 'We show c >= 3 by contradiction...' -- SATISFIED. Criterion 2 (mod-4 invariant): Student never mentions mod 4 -- not satisfied.",
+    "reasoning": "Student satisfies Partial criterion 1 but no Almost criterion; grade is partial.",
+    "response": "partial"
+}}}}
+</json>
+
+Example D -- answer meets no criterion -> "incorrect":
+<json>
+{{{{
+    "essential_components": ["Prove the invariant mod 4.", "Show all pairs satisfying the invariant are reachable."],
+    "almost_criteria": ["Applied infinite descent but did not complete the final step."],
+    "partial_criteria": ["Proved c >= 3.", "Identified the mod-4 invariant."],
+    "step1_correct": "Answer reaches a wrong conclusion.",
+    "step2_almost": "No Almost criterion is satisfied.",
+    "partial_scan": "Criterion 1 (Proved c >= 3): Student never establishes this -- not satisfied. Criterion 2 (mod-4 invariant): Student never mentions mod 4 -- not satisfied. No partial criterion satisfied.",
+    "reasoning": "No criterion is satisfied after checking all of them; grade is incorrect.",
+    "response": "incorrect"
+}}}}
+</json>
+
+Now provide your grading decision below."""
+
+    # ---------------------------------------------------------------------- #
+    # Prediction extraction                                                    #
+    # ---------------------------------------------------------------------- #
+
+    def _extract_prediction(self, assistant_text: str) -> str:
+        """Extract and validate the grade from the assistant's response.
+
+        Strategy:
+          1. Look for <json>...</json> blocks; prefer the last block with a
+             valid "response" key.
+          2. If that fails, use regex fallback on the full text.
+          3. Default to "incorrect" if nothing is found.
+        """
+        prediction = "None"
+
+        try:
+            extracted = _extract_jsons(assistant_text)
+            if extracted:
+                for obj in reversed(extracted):
+                    grade = str(obj.get("response", "")).strip().lower()
+                    if grade in _VALID_GRADES:
+                        prediction = grade
+                        break
+                else:
+                    # No valid grade in any block; take the last block's value.
+                    last_val = str(extracted[-1].get("response", "")).strip().lower()
+                    if last_val:
+                        prediction = last_val
+        except Exception as exc:
+            self.log_fn(f"Error extracting prediction from JSON blocks: {exc}")
+
+        if prediction == "None":
+            try:
+                fallback = _extract_grade_fallback(assistant_text)
+                if fallback and fallback in _VALID_GRADES:
+                    prediction = fallback
+                    self.log_fn("Used fallback grade extraction.")
+            except Exception as exc:
+                self.log_fn(f"Error in fallback grade extraction: {exc}")
+
+        if prediction not in _VALID_GRADES:
+            self.log_fn(f"Could not extract valid grade; defaulting to 'incorrect'. Raw: {assistant_text[:200]}")
+            prediction = "incorrect"
+
+        return prediction
+
+    # ---------------------------------------------------------------------- #
+    # Verification prompts                                                     #
+    # ---------------------------------------------------------------------- #
+
+    def _build_almost_check_prompt(
+        self,
+        problem: str,
+        official_solution: str,
+        grading_guidelines: str,
+        student_answer: str,
+        first_pass_reasoning: str,
+    ) -> str:
+        """Return a focused second-pass prompt to check whether "almost" applies.
+
+        Called when the first pass returned "correct".  The most common grading
+        error is awarding "correct" when the answer actually satisfies an
+        "(Almost)" criterion (worth 6/7 pts, not 7/7).
+        """
+        return f"""You are a strict mathematics competition grader performing a VERIFICATION pass.
+
+A first grader tentatively awarded "correct" (7 points) to the student answer below.
+Your job is to decide whether the grade should instead be "almost" (6 points).
+
+================================================================
+KEY DISTINCTION
+================================================================
+"correct"  (7 pts) -- Every essential logical step is present and sound.
+                       The student reaches the correct final conclusion with
+                       NO significant mathematical gap.  ALL cases and
+                       sub-cases are addressed.
+
+"almost"   (6 pts) -- The student's answer is ESSENTIALLY COMPLETE but has
+                       minor, non-negligible gaps or mistakes.  It satisfies
+                       at least one "(Almost)" criterion in the grading
+                       guidelines.  The gap between "almost" and "correct"
+                       is REAL and INTENTIONAL.
+
+RULE: If ANY "(Almost)" criterion in the grading guidelines is satisfied,
+the grade MUST be "almost", NOT "correct".
+
+================================================================
+PROBLEM
+================================================================
+{problem}
+
+================================================================
+OFFICIAL SOLUTION
+================================================================
+{official_solution}
+
+================================================================
+GRADING GUIDELINES
+================================================================
+{grading_guidelines}
+
+================================================================
+STUDENT'S ANSWER
+================================================================
+{student_answer}
+
+================================================================
+FIRST GRADER'S REASONING (tentative grade: "correct")
+================================================================
+{first_pass_reasoning}
+
+================================================================
+YOUR TASK
+================================================================
+1. List every "(Almost)" criterion from the grading guidelines verbatim.
+2. For EACH "(Almost)" criterion, carefully check whether the student's
+   answer satisfies it.  Quote the specific passage that supports or
+   refutes a match.
+3. Also check: does the student address ALL required parts of the problem?
+   (Both directions of iff, all cases, all sub-cases?)
+4. If ANY "(Almost)" criterion is satisfied, OR if the student's solution
+   has a non-negligible gap, the grade is "almost".
+   Otherwise, confirm "correct".
+
+Output your final answer as a JSON object enclosed in <json> tags.
+
+<json>
+{{
+    "almost_criteria_check": "<for each criterion: criterion text -> satisfied/not satisfied + evidence>",
+    "all_parts_addressed": "<yes/no + explanation>",
+    "reasoning": "<your conclusion>",
+    "response": "correct" or "almost"
+}}
+</json>
+
+Provide your verification decision below."""
+
+    def _build_partial_check_prompt(
+        self,
+        problem: str,
+        official_solution: str,
+        grading_guidelines: str,
+        student_answer: str,
+        first_pass_reasoning: str,
+    ) -> str:
+        """Return a focused second-pass prompt to check whether "partial" applies.
+
+        Called when the first pass returned "incorrect".  The most common
+        grading error is missing partial credit when the student has established
+        a specific sub-result named in a "(Partial)" criterion.
+
+        NOTE: This prompt intentionally does NOT check for "almost" upgrades.
+        Upgrading "incorrect" to "almost" is extremely risky (6/7 pts awarded
+        for what was judged worthless) and empirically causes more harm than good.
+        The "almost" downgrade pass handles "almost" predictions separately.
+        """
+        return f"""You are a careful mathematics competition grader performing a VERIFICATION pass.
+
+A first grader tentatively awarded "incorrect" (0 points) to the student answer below.
+Your job is to decide whether the grade should instead be "partial" (1 point).
+
+IMPORTANT CONTEXT: The first grader may have been too strict.  Partial credit
+is awarded to approximately 25% of answers.  Your job is to look for ANY
+evidence that the student satisfies even ONE partial criterion.
+
+================================================================
+KEY DISTINCTIONS
+================================================================
+"incorrect" (0 pts) -- The student's answer is wrong, fundamentally flawed,
+                        or makes no meaningful progress.  No "(Partial)"
+                        criterion is satisfied.
+
+"partial"   (1 pt)  -- The student makes genuine, non-trivial mathematical
+                        progress.  They EXPLICITLY and VERIFIABLY satisfy AT
+                        LEAST ONE "(Partial)" criterion in the grading guidelines.
+
+GENEROUS STANDARD FOR "partial":
+  Credit the student if the mathematical SUBSTANCE of a "(Partial)" criterion
+  is present ANYWHERE in their answer -- even if the write-up is informal,
+  uses different notation, or the criterion is reached as a by-product of a
+  larger (failed) argument.
+  If the student introduces the exact object, substitution, or construction
+  named in a criterion, that criterion is satisfied even if they do not
+  complete the argument from there.
+  If the student correctly identifies the answer/value/object named in the
+  criterion, that counts even without a full proof.
+  If the student's overall solution is wrong but they establish a specific
+  sub-result named in a criterion, that sub-result earns partial credit.
+
+LIMITS on "partial":
+  • The student must ENGAGE WITH the specific mathematical fact named in the
+    criterion -- merely mentioning a concept or using related terminology
+    does NOT satisfy the criterion.
+  • A long, detailed, confident-sounding answer that never actually addresses
+    the specific sub-result named in the criterion does NOT earn "partial".
+  • Quote the SPECIFIC passage from the student's answer that establishes
+    the criterion.  If you cannot find a specific quoted passage, the
+    criterion is NOT satisfied.
+
+================================================================
+PROBLEM
+================================================================
+{problem}
+
+================================================================
+OFFICIAL SOLUTION
+================================================================
+{official_solution}
+
+================================================================
+GRADING GUIDELINES
+================================================================
+{grading_guidelines}
+
+================================================================
+STUDENT'S ANSWER
+================================================================
+{student_answer}
+
+================================================================
+FIRST GRADER'S REASONING (tentative grade: "incorrect")
+================================================================
+{first_pass_reasoning}
+
+================================================================
+YOUR TASK
+================================================================
+1. List every "(Partial)" criterion from the grading guidelines verbatim.
+2. For EACH "(Partial)" criterion:
+   (a) State precisely what specific fact/object/step it requires.
+   (b) Search the ENTIRE student answer carefully for ANY passage that
+       addresses this fact, even informally or as part of a failed argument.
+   (c) Quote the specific passage if found.
+   (d) Decide: satisfied or not satisfied?
+   Apply a GENEROUS standard -- if the student has engaged with the
+   specific mathematical substance of the criterion, credit it.
+3. If ANY "(Partial)" criterion is substantively satisfied with quoted
+   evidence, the grade is "partial".  Otherwise, confirm "incorrect".
+
+Output your final answer as a JSON object enclosed in <json> tags.
+
+<json>
+{{
+    "partial_criteria_check": "<for each criterion: criterion text -> (a) what it requires, (b) quoted evidence or 'not found', (c) satisfied/not satisfied>",
+    "reasoning": "<your conclusion>",
+    "response": "incorrect" or "partial"
+}}
+</json>
+
+Provide your verification decision below."""
+
+    # ---------------------------------------------------------------------- #
+    # Main entry point                                                         #
+    # ---------------------------------------------------------------------- #
+
+    def _build_almost_from_partial_check_prompt(
+        self,
+        problem: str,
+        official_solution: str,
+        grading_guidelines: str,
+        student_answer: str,
+        first_pass_reasoning: str,
+    ) -> str:
+        """Return a focused second-pass prompt to check whether "almost" applies
+        when the first pass returned "partial".
+
+        This catches cases where the student is actually near-complete but was
+        initially under-graded as partial.
+        """
+        return f"""You are a strict mathematics competition grader performing a VERIFICATION pass.
+
+A first grader tentatively awarded "partial" (1 point) to the student answer below.
+Your job is to decide whether the grade should instead be "almost" (6 points).
+
+================================================================
+KEY DISTINCTION
+================================================================
+"partial"  (1 pt)  -- The student makes genuine, non-trivial mathematical
+                       progress but the answer is substantially incomplete.
+                       They satisfy a "(Partial)" criterion but NOT an
+                       "(Almost)" criterion.
+
+"almost"   (6 pts) -- The student's answer is ESSENTIALLY COMPLETE but has
+                       minor, non-negligible gaps or mistakes.  It satisfies
+                       at least one "(Almost)" criterion in the grading
+                       guidelines.  The gap between "almost" and "correct"
+                       is REAL and INTENTIONAL.
+
+RULE: If ANY "(Almost)" criterion in the grading guidelines is satisfied,
+the grade MUST be "almost", NOT "partial".
+
+IMPORTANT: "almost" is only ~5% of answers.  The cost of a false "almost"
+is very high (5 extra points awarded incorrectly).  Only upgrade to "almost"
+if you are CERTAIN all four conditions hold:
+  (A) The student's overall approach is CORRECT (not just plausible).
+  (B) The solution is GENUINELY NEAR-COMPLETE (not just long or detailed).
+  (C) The mistakes are TRULY MINOR (not fundamental errors).
+  (D) The answer EXPLICITLY satisfies a specific "(Almost)" criterion.
+If ANY condition fails, confirm "partial".
+
+================================================================
+PROBLEM
+================================================================
+{problem}
+
+================================================================
+OFFICIAL SOLUTION
+================================================================
+{official_solution}
+
+================================================================
+GRADING GUIDELINES
+================================================================
+{grading_guidelines}
+
+================================================================
+STUDENT'S ANSWER
+================================================================
+{student_answer}
+
+================================================================
+FIRST GRADER'S REASONING (tentative grade: "partial")
+================================================================
+{first_pass_reasoning}
+
+================================================================
+YOUR TASK
+================================================================
+1. List every "(Almost)" criterion from the grading guidelines verbatim.
+2. For EACH "(Almost)" criterion, carefully check whether the student's
+   answer satisfies it.  Quote the specific passage that supports or
+   refutes a match.
+3. CRITICAL TESTS for "almost" -- ALL must pass:
+   (i)  Is the student's overall approach CORRECT (not just plausible)?
+   (ii) Is the solution GENUINELY NEAR-COMPLETE (not just long)?
+   (iii) Are the mistakes truly MINOR (not fundamental errors)?
+   (iv) Does the student reach the correct conclusion or come within
+        one minor step of it?
+4. If ANY "(Almost)" criterion is satisfied AND ALL four tests pass,
+   the grade is "almost".  Otherwise, confirm "partial".
+   DEFAULT: If uncertain, confirm "partial".
+
+Output your final answer as a JSON object enclosed in <json> tags.
+
+<json>
+{{
+    "almost_criteria_check": "<for each criterion: criterion text -> satisfied/not satisfied + evidence>",
+    "approach_correct": "<yes/no + explanation>",
+    "near_complete": "<yes/no + explanation>",
+    "mistakes_minor": "<yes/no + explanation>",
+    "correct_conclusion_reached": "<yes/no + explanation>",
+    "reasoning": "<your conclusion>",
+    "response": "partial" or "almost"
+}}
+</json>
+
+Provide your verification decision below."""
+
+    def _build_almost_downgrade_prompt(
+        self,
+        problem: str,
+        official_solution: str,
+        grading_guidelines: str,
+        student_answer: str,
+        first_pass_reasoning: str,
+    ) -> str:
+        """Return a focused verification prompt to check whether "almost" is
+        truly warranted, or whether the grade should be "partial" or "incorrect".
+
+        Called when the first pass returned "almost".  Over-predicting "almost"
+        is the most costly grading error (5-6 points per false positive).
+        """
+        return f"""You are an EXTREMELY SKEPTICAL mathematics competition grader performing a VERIFICATION pass.
+
+A first grader tentatively awarded "almost" (6 points) to the student answer below.
+Your job is to AGGRESSIVELY CHALLENGE this grade.  Assume the first grader was too generous.
+Your DEFAULT answer is "partial".  Only confirm "almost" if you can PROVE all four
+conditions hold with CONCRETE, QUOTED evidence.  If there is ANY doubt, choose "partial".
+
+EMPIRICAL PRIOR: "almost" is correct only ~5% of the time.  The first grader is
+almost certainly wrong.  Treat this as a "partial" answer unless proven otherwise.
+
+================================================================
+CRITICAL CONTEXT — READ BEFORE ANYTHING ELSE
+================================================================
+"almost" is awarded to only ~5% of answers.  It is the MOST DANGEROUS grade
+to award incorrectly: a false "almost" costs 5-6 points per error.
+
+THE BURDEN OF PROOF IS ON "almost":
+  You must find CONCRETE, QUOTED EVIDENCE for EACH of the four conditions.
+  If you cannot quote specific text from the student's answer that proves
+  a condition, that condition FAILS and the grade must be downgraded.
+
+"almost"   (6 pts) -- ALL four conditions must hold simultaneously:
+                       (A) The student's overall approach is CORRECT — not
+                           just plausible or partially right.  The student
+                           must be using the RIGHT method, not just a method
+                           that happens to produce some correct sub-results.
+                       (B) The solution is GENUINELY NEAR-COMPLETE — the
+                           student has completed the vast majority of the
+                           proof.  A long attempt that covers only 50-70%
+                           of the required argument is NOT near-complete.
+                       (C) The mistakes are TRULY MINOR — a single missing
+                           key step, a wrong final answer, or a fundamental
+                           logical gap is NOT minor.  Minor means: a small
+                           computational slip, a missing edge case in an
+                           otherwise complete argument, or a trivially
+                           fixable notation issue.
+                       (D) The answer EXPLICITLY satisfies a specific
+                           "(Almost)" criterion — quote the exact passage
+                           from the student's answer as evidence.
+
+"partial"  (1 pt)  -- The student makes genuine progress but the answer is
+                       substantially incomplete or has significant errors.
+                       They satisfy a "(Partial)" criterion.
+
+"incorrect" (0 pts) -- The student's answer is wrong or makes no meaningful
+                        progress.  No criterion is satisfied.
+
+DOWNGRADE TRIGGERS — if ANY of these apply, do NOT award "almost":
+  • The student's final answer or key conclusion is WRONG.
+  • The student uses a fundamentally incorrect approach or method.
+  • The student's proof has a gap that requires a non-trivial new idea to fix.
+  • The student only covers some cases but not all required cases.
+  • The student's argument is long but circular or hand-wavy at a key step.
+  • You cannot quote specific text proving the approach is correct.
+  • You cannot quote specific text proving the solution is near-complete.
+
+================================================================
+SPECIAL GUIDANCE FOR "OMITTED THE CASE" CRITERIA
+================================================================
+Some "(Almost)" criteria say things like "Omitted the case when X" or
+"Solution is almost complete, but omitted [specific sub-case]".
+
+CRITICAL INTERPRETATION: These criteria apply ONLY when the student:
+  1. Uses the SAME overall approach as the official solution, AND
+  2. Has completed essentially ALL of the proof EXCEPT the named omission.
+
+A student who uses a DIFFERENT approach from the official solution does NOT
+satisfy an "omitted the case" criterion, even if their approach is long and
+detailed.  The criterion is about a student who was on the right track and
+nearly finished, not about a student who took a different path.
+
+EXAMPLE: If the official solution uses "consider a prime p dividing K=d²ab+1"
+and the "(Almost)" criterion says "Omitted the case when K has no odd prime
+factor", then a student who instead considers "a prime p dividing x+y" does
+NOT satisfy this criterion — they are using a different approach entirely.
+
+Similarly, if the "(Almost)" criterion says "Solution is almost complete, but
+made minor mistakes which are not negligible", this requires the student to
+have a CORRECT overall approach and to be GENUINELY NEAR-COMPLETE (>85% of
+the proof done correctly).  A long attempt that uses a different method or
+fails to complete the key argument does NOT satisfy this criterion.
+
+================================================================
+PROBLEM
+================================================================
+{problem}
+
+================================================================
+OFFICIAL SOLUTION
+================================================================
+{official_solution}
+
+================================================================
+GRADING GUIDELINES
+================================================================
+{grading_guidelines}
+
+================================================================
+STUDENT'S ANSWER
+================================================================
+{student_answer}
+
+================================================================
+FIRST GRADER'S REASONING (tentative grade: "almost")
+================================================================
+{first_pass_reasoning}
+
+================================================================
+YOUR TASK — BE SKEPTICAL; DOWNGRADE UNLESS ALL CONDITIONS ARE MET
+================================================================
+1. List every "(Almost)" criterion from the grading guidelines verbatim.
+2. For EACH "(Almost)" criterion, carefully check whether the student's
+   answer EXPLICITLY satisfies it.  Quote the SPECIFIC passage from the
+   student's answer (not from the guidelines).  If you cannot find a
+   specific quoted passage, the criterion is NOT satisfied.
+   SPECIAL CHECK for "omitted the case" or "almost complete" criteria:
+   - Does the student use the SAME approach as the official solution?
+     If not, the criterion is NOT satisfied — write "FAILS: different approach".
+   - Is the student's solution genuinely >85% complete using that approach?
+     If not, write "FAILS: not near-complete".
+3. Verify ALL four conditions for "almost" with QUOTED EVIDENCE:
+   (A) Quote the passage showing the student's approach MATCHES the official
+       solution's approach.  If the student uses a different method, write
+       "FAILS: student uses [X] approach, official uses [Y] approach".
+   (B) Quote the passage showing the solution is NEAR-COMPLETE (>85% done).
+       If the student is missing major steps, write "FAILS".
+   (C) Identify the specific mistake(s).  Are they truly minor?
+       If any mistake requires a non-trivial fix, write "FAILS".
+   (D) Quote the exact passage satisfying the "(Almost)" criterion.
+       If no such passage exists, write "FAILS".
+4. Decision:
+   - DEFAULT: Choose "partial" unless ALL four conditions are proven with
+     CONCRETE QUOTED EVIDENCE.  "Almost" is only ~5% of answers.
+   - If ALL four conditions hold with quoted evidence -> confirm "almost".
+   - If condition (A) or (B) fails -> check "(Partial)" criteria; if any
+     is satisfied -> "partial"; otherwise -> "incorrect".
+   - If condition (C) or (D) fails -> check "(Partial)" criteria; if any
+     is satisfied -> "partial"; otherwise -> "incorrect".
+   - If you are uncertain about ANY condition -> choose "partial".
+   REMEMBER: A false "almost" costs 5-6 points.  A false "partial" costs
+   only 0-1 points.  When in doubt, ALWAYS choose "partial".
+
+Output your final answer as a JSON object enclosed in <json> tags.
+
+<json>
+{{
+    "almost_criteria_check": "<for each criterion: criterion text -> satisfied/not satisfied + QUOTED evidence from student answer>",
+    "approach_matches_official": "<yes/no: does student use the SAME approach as official solution? + explanation>",
+    "approach_correct_evidence": "<QUOTED passage proving correct approach, or FAILS + reason>",
+    "near_complete_evidence": "<QUOTED passage proving near-completeness (>85%), or FAILS + reason>",
+    "mistakes_assessment": "<specific mistake(s) identified; are they truly minor? yes/no + reason>",
+    "explicit_criterion_match": "<QUOTED passage matching the Almost criterion, or FAILS>",
+    "downgrade_triggers_present": "<list any downgrade triggers that apply>",
+    "partial_criteria_check": "<if downgrading: check each (Partial) criterion and whether student satisfies it>",
+    "reasoning": "<your conclusion>",
+    "response": "almost" or "partial" or "incorrect"
+}}
+</json>
+
+Provide your verification decision below."""
+
+    def _build_correct_downgrade_prompt(
+        self,
+        problem: str,
+        official_solution: str,
+        grading_guidelines: str,
+        student_answer: str,
+        first_pass_reasoning: str,
+    ) -> str:
+        """Return a focused verification prompt to check whether "correct" should
+        be downgraded to "partial" or "almost".
+
+        Called when the first pass returned "correct".  This pass checks for
+        genuine incompleteness — but does NOT default to downgrading.  The first
+        grader's "correct" verdict should be respected unless there is clear,
+        concrete evidence of a significant gap.
+
+        NOTE: This is a SEPARATE pass from the almost-check pass.  The almost-check
+        pass (pass 2a) focuses on correct->almost.  This pass focuses on
+        correct->partial and correct->incorrect.  Both passes run when the first
+        pass returns "correct".
+        """
+        return f"""You are a careful mathematics competition grader performing a VERIFICATION pass.
+
+A first grader tentatively awarded "correct" (7 points) to the student answer below.
+Your job is to confirm or correct this grade.
+
+IMPORTANT BIAS NOTE: The first grader has already reviewed this answer carefully and
+awarded "correct".  Do NOT downgrade unless you find CLEAR, CONCRETE evidence of a
+significant mathematical gap.  Vague doubts or stylistic concerns are NOT sufficient
+to downgrade.  The burden of proof is on DOWNGRADING, not on confirming "correct".
+
+CALIBRATION: In practice, the first grader's "correct" verdict is right the majority
+of the time.  Only downgrade if you can point to a SPECIFIC missing step, wrong
+conclusion, or unaddressed case.  If the solution looks complete and reaches the
+right answer, confirm "correct".
+
+================================================================
+GRADE DEFINITIONS
+================================================================
+"correct"  (7 pts) -- Every essential logical step is present and sound.
+                       The student reaches the correct final conclusion with
+                       no significant mathematical gap.  ALL cases and
+                       sub-cases are addressed.  The solution is complete.
+                       NOTE: Minor presentational gaps or omitted trivial steps
+                       do NOT disqualify "correct".  Only significant mathematical
+                       gaps matter.  A well-structured proof that covers all
+                       required cases and reaches the correct conclusion earns
+                       "correct" even if it is not written at textbook level.
+
+"almost"   (6 pts) -- The student's answer is essentially complete but has
+                       minor, non-negligible gaps.  It satisfies an "(Almost)"
+                       criterion in the grading guidelines.
+
+"partial"  (1 pt)  -- The student makes genuine progress but the answer is
+                       substantially incomplete.  They satisfy a "(Partial)"
+                       criterion but NOT a "correct" or "almost" standard.
+                       IMPORTANT: Only downgrade to "partial" if the student
+                       clearly fails to complete a major required component of
+                       the proof — not just because the write-up is terse.
+
+"incorrect" (0 pts) -- No meaningful progress.  No criterion satisfied.
+
+================================================================
+DOWNGRADE TRIGGERS — only downgrade if you find CONCRETE evidence of these:
+================================================================
+  • The student's final answer or key conclusion is demonstrably WRONG.
+  • The student explicitly proves only one direction of a required iff,
+    and the other direction is non-trivial and clearly missing.
+  • The student explicitly handles only some cases, and the missing cases
+    are non-trivial and clearly absent from the answer.
+  • The student's proof has a gap that requires a genuinely non-trivial
+    new idea to fix — not just a routine calculation or trivial step.
+  • ANY "(Almost)" criterion in the grading guidelines is clearly satisfied.
+  • The student only establishes a sub-result named in a "(Partial)"
+    criterion and does NOT complete the full proof.
+
+DO NOT downgrade for:
+  • Terse or informal presentation of steps that are clearly implied.
+  • Using a different (but valid) approach from the official solution.
+  • Omitting routine calculations that follow trivially from what is written.
+  • Stylistic differences or non-standard notation.
+  • Vague concerns without a specific identified gap.
+
+================================================================
+PROBLEM
+================================================================
+{problem}
+
+================================================================
+OFFICIAL SOLUTION
+================================================================
+{official_solution}
+
+================================================================
+GRADING GUIDELINES
+================================================================
+{grading_guidelines}
+
+================================================================
+STUDENT'S ANSWER
+================================================================
+{student_answer}
+
+================================================================
+FIRST GRADER'S REASONING (tentative grade: "correct")
+================================================================
+{first_pass_reasoning}
+
+================================================================
+YOUR TASK — CONFIRM "correct" UNLESS YOU FIND CLEAR EVIDENCE OF A GAP
+================================================================
+1. List every essential component a complete solution must contain.
+2. For EACH essential component:
+   (a) State precisely what the component requires.
+   (b) Search the student's answer for a passage that establishes it.
+   (c) Quote the specific passage if found; write "MISSING" only if
+       the component is genuinely absent (not just tersely presented).
+   (d) Is the component established (even if informally)?
+3. Check the "(Almost)" criteria: does ANY clearly apply?
+   If yes -> grade is "almost", NOT "correct".
+4. Check the "(Partial)" criteria: does the student ONLY satisfy partial
+   criteria without completing the full solution?
+   If yes -> grade is "partial", NOT "correct".
+5. Decision:
+   - DEFAULT: Confirm "correct" unless you find CLEAR, CONCRETE evidence
+     of a significant gap.  The first grader's verdict deserves respect.
+   - If ALL components are present (even if informally) -> confirm "correct".
+   - If ANY "(Almost)" criterion clearly applies -> grade is "almost".
+   - If the student clearly fails to complete a major component -> "partial".
+   - If no criterion is satisfied -> grade is "incorrect".
+   REMEMBER: A false downgrade from "correct" to "partial" costs 6 points.
+   Only downgrade when the evidence is clear and specific.
+
+Output your final answer as a JSON object enclosed in <json> tags.
+
+<json>
+{{
+    "essential_components": "<list of all required components>",
+    "components_check": "<for each component: component -> present/absent + QUOTED evidence>",
+    "almost_criteria_check": "<for each Almost criterion: satisfied/not satisfied + evidence>",
+    "partial_criteria_check": "<does the student only satisfy partial criteria? yes/no + evidence>",
+    "final_answer_correct": "<yes/no: does the student reach the correct final conclusion?>",
+    "all_cases_covered": "<yes/no: does the student address ALL required cases?>",
+    "specific_gap_found": "<describe any specific, concrete gap found, or 'none'>",
+    "reasoning": "<your conclusion>",
+    "response": "correct" or "almost" or "partial" or "incorrect"
+}}
+</json>
+
+Provide your verification decision below."""
+
+    def _build_partial_upgrade_prompt(
+        self,
+        problem: str,
+        official_solution: str,
+        grading_guidelines: str,
+        student_answer: str,
+        first_pass_reasoning: str,
+    ) -> str:
+        """Return a focused second-pass prompt to check whether "correct" applies
+        when the first pass returned "partial".
+
+        Called when the first pass returned "partial".  Sometimes a complete
+        solution is under-graded as partial when the grader misses that all
+        essential steps are present.  This pass checks whether the answer is
+        actually fully correct.
+        """
+        return f"""You are a careful mathematics competition grader performing a VERIFICATION pass.
+
+A first grader tentatively awarded "partial" (1 point) to the student answer below.
+Your job is to decide whether the grade should instead be "correct" (7 points).
+
+================================================================
+KEY DISTINCTION
+================================================================
+"partial"  (1 pt)  -- The student makes genuine, non-trivial mathematical
+                       progress but the answer is substantially incomplete.
+                       They satisfy a "(Partial)" criterion but NOT a
+                       "(Almost)" or "correct" standard.
+
+"correct"  (7 pts) -- Every essential logical step is present and sound.
+                       The student reaches the correct final conclusion with
+                       NO significant mathematical gap.  ALL cases and
+                       sub-cases are addressed.
+
+IMPORTANT: Only upgrade to "correct" if you are CERTAIN the solution is
+complete.  A solution that is mostly right but missing a key step or case
+is NOT "correct".  When in doubt, confirm "partial".
+
+================================================================
+PROBLEM
+================================================================
+{problem}
+
+================================================================
+OFFICIAL SOLUTION
+================================================================
+{official_solution}
+
+================================================================
+GRADING GUIDELINES
+================================================================
+{grading_guidelines}
+
+================================================================
+STUDENT'S ANSWER
+================================================================
+{student_answer}
+
+================================================================
+FIRST GRADER'S REASONING (tentative grade: "partial")
+================================================================
+{first_pass_reasoning}
+
+================================================================
+YOUR TASK
+================================================================
+1. List every essential component a complete solution must contain.
+2. For EACH essential component, check whether the student's answer
+   contains it.  Quote the specific passage that supports or refutes
+   a match.
+3. Check: does the student address ALL required parts of the problem?
+   (Both directions of iff, all cases, all sub-cases, correct final answer?)
+4. If ALL essential components are present and the student reaches the
+   correct final conclusion with no significant gap -> upgrade to "correct".
+   Otherwise, confirm "partial".
+   DEFAULT: If uncertain, confirm "partial".
+
+Output your final answer as a JSON object enclosed in <json> tags.
+
+<json>
+{{
+    "essential_components_check": "<for each component: component -> present/absent + evidence>",
+    "all_parts_addressed": "<yes/no + explanation>",
+    "correct_final_answer": "<yes/no + explanation>",
+    "reasoning": "<your conclusion>",
+    "response": "partial" or "correct"
+}}
+</json>
+
+Provide your verification decision below."""
+
+    def _build_partial_verify_prompt(
+        self,
+        problem: str,
+        official_solution: str,
+        grading_guidelines: str,
+        student_answer: str,
+        first_pass_reasoning: str,
+    ) -> str:
+        """Return a focused verification prompt for "partial" predictions.
+
+        Called when the first pass returned "partial".  Verifies in two
+        directions:
+          (a) Is "partial" truly warranted, or should it be "incorrect"?
+              False partial for true-incorrect is a common error (1 pt awarded
+              for a worthless answer).
+          (b) Is the answer actually fully "correct"?
+              Under-grading a complete solution as partial costs 6 pts.
+
+        NOTE: Does NOT check for upgrade to "almost" -- empirical data shows
+        partial->almost upgrades cause far more false positives (5/7 pt penalty
+        each) than they correct.  "almost" is only ~5% of answers.
+        """
+        return f"""You are a careful mathematics competition grader performing a VERIFICATION pass.
+
+A first grader tentatively awarded "partial" (1 point) to the student answer below.
+Your job is to verify this grade in TWO directions:
+  (A) Is "partial" truly warranted, or should it be "incorrect" (0 points)?
+  (B) Is the answer actually fully "correct" (7 points)?
+
+IMPORTANT BIAS NOTE: The first grader has already identified partial credit.
+Apply a GENEROUS standard for partial credit -- partial is awarded to ~25% of
+answers.  The default is to CONFIRM "partial" unless you find clear evidence
+that no partial criterion is satisfied.  Only downgrade to "incorrect" if you
+are CERTAIN no partial criterion is satisfied after a thorough search.
+Only upgrade to "correct" if you are CERTAIN the solution is complete.
+When in doubt, confirm "partial".
+
+CALIBRATION: Downgrading "partial" to "incorrect" costs 1 point if wrong.
+Downgrading "correct" to "partial" costs 6 points if wrong.  Be more
+conservative about downgrading than upgrading.
+
+================================================================
+GRADE DEFINITIONS
+================================================================
+"correct"  (7 pts) -- Every essential logical step is present and sound.
+                       The student reaches the correct final conclusion with
+                       NO significant mathematical gap.  ALL cases and
+                       sub-cases are addressed.
+
+"partial"  (1 pt)  -- The student makes genuine, non-trivial mathematical
+                       progress.  They EXPLICITLY and VERIFIABLY satisfy AT
+                       LEAST ONE "(Partial)" criterion in the grading guidelines.
+                       The mathematical SUBSTANCE of the criterion must be
+                       present -- not just related terminology or a failed
+                       attempt.
+
+"incorrect" (0 pts) -- The student's answer is wrong or makes no meaningful
+                        progress.  No "(Partial)" criterion is satisfied.
+                        Only downgrade to "incorrect" if you are CERTAIN that
+                        no partial criterion is satisfied after a thorough search.
+
+================================================================
+GENEROUS STANDARD FOR "partial"
+================================================================
+The student must ENGAGE WITH the specific mathematical fact named in the
+criterion.  This includes:
+  - Deriving the fact as part of a larger (even failed) argument.
+  - Introducing the exact object/construction named in the criterion.
+  - Correctly identifying the answer/value named in the criterion.
+  - Stating the fact with a plausible sketch (even if incomplete).
+
+If you find ANY passage in the student's answer that engages with the
+required mathematical fact, confirm "partial".  The standard is generous.
+
+================================================================
+PROBLEM
+================================================================
+{problem}
+
+================================================================
+OFFICIAL SOLUTION
+================================================================
+{official_solution}
+
+================================================================
+GRADING GUIDELINES
+================================================================
+{grading_guidelines}
+
+================================================================
+STUDENT'S ANSWER
+================================================================
+{student_answer}
+
+================================================================
+FIRST GRADER'S REASONING (tentative grade: "partial")
+================================================================
+{first_pass_reasoning}
+
+================================================================
+YOUR TASK
+================================================================
+DIRECTION A -- Verify "partial" vs "incorrect":
+1. List every "(Partial)" criterion from the grading guidelines verbatim.
+2. For EACH criterion:
+   (a) State what specific fact/object/step it requires.
+   (b) Search the student's answer for ANY passage that engages with this.
+   (c) Quote the passage if found.
+   (d) Decide: satisfied or not satisfied?
+   Apply a GENEROUS standard -- if the student has engaged with the
+   mathematical substance of the criterion anywhere in their answer, credit it.
+3. If ANY criterion is satisfied with quoted evidence -> confirm "partial".
+4. Only if NO criterion is satisfied after a thorough search -> "incorrect".
+   DEFAULT: Confirm "partial" when in doubt.
+
+DIRECTION B -- Verify "partial" vs "correct":
+5. List every essential component a complete solution must contain.
+6. For EACH component, check whether the student's answer contains it.
+7. If ALL components are present and the student reaches the correct final
+   conclusion with no significant gap -> grade is "correct".
+   DEFAULT: If uncertain, confirm "partial" (not "correct").
+
+FINAL DECISION:
+- DEFAULT: Confirm "partial" unless you have clear evidence to change.
+- If no (Partial) criterion is satisfied after thorough search -> "incorrect".
+- If all essential components are present and complete -> "correct".
+- Otherwise -> confirm "partial".
+- Do NOT upgrade to "almost" -- that requires a separate, much higher bar.
+
+Output your final answer as a JSON object enclosed in <json> tags.
+
+<json>
+{{
+    "partial_criteria_check": "<for each criterion: criterion text -> (a) what it requires, (b) quoted evidence or 'not found', (c) satisfied/not satisfied>",
+    "any_partial_criterion_satisfied": "<yes/no>",
+    "essential_components_check": "<for each component: present/absent + evidence>",
+    "all_components_present": "<yes/no>",
+    "reasoning": "<your conclusion>",
+    "response": "partial" or "incorrect" or "correct"
+}}
+</json>
+
+Provide your verification decision below."""
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Uses a multi-pass strategy for borderline grades:
+          - Pass 1: full grading prompt -> initial grade.
+          - Pass 2a (if "correct"): check for "(Almost)" criteria -- the most
+            common error is awarding "correct" when "almost" applies.
+          - Pass 2b (if "correct", after 2a): dedicated downgrade check for
+            "correct" -> "partial" or "incorrect".  The most COSTLY systematic
+            error is awarding "correct" (7 pts) to a "partial" answer (1 pt),
+            costing 6 pts per occurrence.  This pass aggressively challenges
+            "correct" predictions that survived the almost-check.
+          - Pass 2c (if "incorrect"): check for "(Partial)" criteria -- the
+            second most common error is missing partial credit.
+          - Pass 2d (if "almost"): verify "almost" is truly warranted -- the
+            most COSTLY error is over-predicting "almost" (5/7 pts per false
+            positive).  Downgrade to "partial" or "incorrect" if not warranted.
+          - Pass 2e (if "partial"): verify "partial" is truly warranted vs
+            "incorrect" (false partial is a common error), and check whether
+            the answer is actually fully "correct" (under-grading costs 6 pts).
+          - Pass 3 (if still "incorrect" after pass 2c): a second dedicated
+            partial-credit scan to catch cases the first verification missed.
+            Partial credit is awarded to ~25% of answers; missing it is the
+            most common grading error.
+
+        NOTE: The partial->almost upgrade pass has been removed because
+        empirical data shows it causes far more false "almost" predictions
+        (costing 5/7 pts each) than it corrects.  "almost" is only ~5% of
+        answers; the partial->almost upgrade is almost always wrong.
+        The "almost" downgrade pass (2d) is more important for accuracy.
+
+        EMPIRICAL PRIORITY ORDER (by cost of error):
+          1. correct->partial (6 pts/error) -- addressed by passes 2a+2b
+          2. partial->almost  (5 pts/error) -- addressed by pass 2d
+          3. correct->almost  (1 pt/error)  -- addressed by pass 2a
+          4. incorrect->partial (1 pt/error) -- addressed by passes 2c+3
+          5. partial->incorrect (1 pt/error) -- addressed by pass 2e
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines,
+                    student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        problem            = inputs.get("problem", "")
+        official_solution  = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer     = inputs.get("student_answer", "")
+
+        # ------------------------------------------------------------------ #
+        # Pass 1: full grading                                                #
+        # ------------------------------------------------------------------ #
+        instruction = self._build_instruction(
+            problem=problem,
+            official_solution=official_solution,
+            grading_guidelines=grading_guidelines,
+            student_answer=student_answer,
+        )
+
+        response, msg_history, _info = get_response_from_llm(
+            msg=instruction,
+            model=self.model,
+            msg_history=[],
+        )
+
+        assistant_text = _get_assistant_text(msg_history, response)
+        prediction = self._extract_prediction(assistant_text)
+
+        # ------------------------------------------------------------------ #
+        # Pass 2: targeted verification for borderline grades                 #
+        # ------------------------------------------------------------------ #
+        has_almost_criteria  = "(Almost)" in grading_guidelines
+        has_partial_criteria = "(Partial)" in grading_guidelines
+
+        # Track whether pass 2c (incorrect->partial check) was run, so we
+        # can decide whether to run a second partial scan in pass 3.
+        ran_partial_check = False
+
+        if prediction in _VERIFY_GRADES:
+
+            # -------------------------------------------------------------- #
+            # Pass 2a: "correct" -> check for "(Almost)" criteria             #
+            # -------------------------------------------------------------- #
+            if prediction == "correct" and has_almost_criteria:
+                # Most common error: "correct" when "almost" should apply.
+                verify_prompt = self._build_almost_check_prompt(
+                    problem=problem,
+                    official_solution=official_solution,
+                    grading_guidelines=grading_guidelines,
+                    student_answer=student_answer,
+                    first_pass_reasoning=assistant_text,
+                )
+                try:
+                    v_response, v_history, _v_info = get_response_from_llm(
+                        msg=verify_prompt,
+                        model=self.model,
+                        msg_history=[],
+                    )
+                    v_text = _get_assistant_text(v_history, v_response)
+                    v_prediction = self._extract_prediction(v_text)
+                    if v_prediction in {"correct", "almost"}:
+                        if v_prediction != prediction:
+                            self.log_fn(
+                                f"Pass 2a almost-check changed grade: {prediction} -> {v_prediction}"
+                            )
+                        prediction = v_prediction
+                        msg_history = msg_history + v_history
+                    else:
+                        self.log_fn(
+                            f"Pass 2a almost-check returned unexpected grade {v_prediction!r}; "
+                            f"keeping {prediction!r}."
+                        )
+                except Exception as exc:
+                    self.log_fn(f"Pass 2a almost-check failed: {exc}; keeping original grade.")
+
+            # -------------------------------------------------------------- #
+            # Pass 2b: "correct" -> dedicated downgrade check (correct->partial)
+            # This is the MOST COSTLY systematic error: awarding "correct" to
+            # a "partial" answer costs 6 pts per occurrence.  Run this pass
+            # whenever the grade is still "correct" after pass 2a.
+            # -------------------------------------------------------------- #
+            if prediction == "correct":
+                downgrade_prompt = self._build_correct_downgrade_prompt(
+                    problem=problem,
+                    official_solution=official_solution,
+                    grading_guidelines=grading_guidelines,
+                    student_answer=student_answer,
+                    first_pass_reasoning=assistant_text,
+                )
+                try:
+                    d_response, d_history, _d_info = get_response_from_llm(
+                        msg=downgrade_prompt,
+                        model=self.model,
+                        msg_history=[],
+                    )
+                    d_text = _get_assistant_text(d_history, d_response)
+                    d_prediction = self._extract_prediction(d_text)
+                    # Accept any valid downgrade: correct -> almost/partial/incorrect
+                    if d_prediction in {"correct", "almost", "partial", "incorrect"}:
+                        if d_prediction != prediction:
+                            self.log_fn(
+                                f"Pass 2b correct-downgrade changed grade: {prediction} -> {d_prediction}"
+                            )
+                        prediction = d_prediction
+                        msg_history = msg_history + d_history
+                    else:
+                        self.log_fn(
+                            f"Pass 2b correct-downgrade returned unexpected grade {d_prediction!r}; "
+                            f"keeping {prediction!r}."
+                        )
+                except Exception as exc:
+                    self.log_fn(f"Pass 2b correct-downgrade failed: {exc}; keeping original grade.")
+
+            # -------------------------------------------------------------- #
+            # Pass 2c: "incorrect" -> check for "(Partial)" criteria          #
+            # -------------------------------------------------------------- #
+            elif prediction == "incorrect" and (has_partial_criteria or has_almost_criteria):
+                # Second most common error: "incorrect" when "partial" or "almost"
+                # should apply.  Check for partial credit first; the partial check
+                # prompt also catches near-complete answers.
+                verify_prompt = self._build_partial_check_prompt(
+                    problem=problem,
+                    official_solution=official_solution,
+                    grading_guidelines=grading_guidelines,
+                    student_answer=student_answer,
+                    first_pass_reasoning=assistant_text,
+                )
+                ran_partial_check = True
+                try:
+                    v_response, v_history, _v_info = get_response_from_llm(
+                        msg=verify_prompt,
+                        model=self.model,
+                        msg_history=[],
+                    )
+                    v_text = _get_assistant_text(v_history, v_response)
+                    v_prediction = self._extract_prediction(v_text)
+                    # "incorrect" can be confirmed or upgraded to "partial" only.
+                    # Upgrading to "almost" is too risky (6/7 pts for a first-pass
+                    # "incorrect" answer) and empirically causes more harm than good.
+                    if v_prediction in {"incorrect", "partial"}:
+                        if v_prediction != prediction:
+                            self.log_fn(
+                                f"Pass 2c partial-check changed grade: {prediction} -> {v_prediction}"
+                            )
+                        prediction = v_prediction
+                        msg_history = msg_history + v_history
+                    else:
+                        self.log_fn(
+                            f"Pass 2c partial-check returned unexpected grade {v_prediction!r} "
+                            f"for first-pass {prediction!r}; keeping original."
+                        )
+                except Exception as exc:
+                    self.log_fn(f"Pass 2c partial-check failed: {exc}; keeping original grade.")
+
+            # -------------------------------------------------------------- #
+            # Pass 2d: "almost" -> verify "almost" is truly warranted         #
+            # -------------------------------------------------------------- #
+            elif prediction == "almost":
+                # Most COSTLY error: over-predicting "almost" (5-6 pts per false
+                # positive).  Always verify "almost" predictions.
+                verify_prompt = self._build_almost_downgrade_prompt(
+                    problem=problem,
+                    official_solution=official_solution,
+                    grading_guidelines=grading_guidelines,
+                    student_answer=student_answer,
+                    first_pass_reasoning=assistant_text,
+                )
+                try:
+                    v_response, v_history, _v_info = get_response_from_llm(
+                        msg=verify_prompt,
+                        model=self.model,
+                        msg_history=[],
+                    )
+                    v_text = _get_assistant_text(v_history, v_response)
+                    v_prediction = self._extract_prediction(v_text)
+                    # "almost" can be confirmed or downgraded to partial/incorrect
+                    if v_prediction in {"almost", "partial", "incorrect"}:
+                        if v_prediction != prediction:
+                            self.log_fn(
+                                f"Pass 2d almost-downgrade changed grade: {prediction} -> {v_prediction}"
+                            )
+                        prediction = v_prediction
+                        msg_history = msg_history + v_history
+                    else:
+                        self.log_fn(
+                            f"Pass 2d almost-downgrade returned unexpected grade {v_prediction!r} "
+                            f"for first-pass {prediction!r}; keeping original."
+                        )
+                except Exception as exc:
+                    self.log_fn(f"Pass 2d almost-downgrade failed: {exc}; keeping original grade.")
+
+            # -------------------------------------------------------------- #
+            # Pass 2e: "partial" -> verify in both directions                 #
+            # -------------------------------------------------------------- #
+            elif prediction == "partial":
+                # Verify "partial" predictions in both directions:
+                # (a) Check whether "partial" is truly warranted vs "incorrect"
+                #     (false partial for true-incorrect is a common error).
+                # (b) Check whether the answer is actually fully "correct"
+                #     (under-grading a complete solution as partial is costly).
+                # NOTE: No upgrade to "almost" -- empirical data shows that
+                # partial->almost upgrades cause far more false positives than
+                # they correct.  "almost" is only ~5% of answers.
+                verify_prompt = self._build_partial_verify_prompt(
+                    problem=problem,
+                    official_solution=official_solution,
+                    grading_guidelines=grading_guidelines,
+                    student_answer=student_answer,
+                    first_pass_reasoning=assistant_text,
+                )
+                try:
+                    v_response, v_history, _v_info = get_response_from_llm(
+                        msg=verify_prompt,
+                        model=self.model,
+                        msg_history=[],
+                    )
+                    v_text = _get_assistant_text(v_history, v_response)
+                    v_prediction = self._extract_prediction(v_text)
+                    # "partial" can be confirmed, downgraded to "incorrect", or
+                    # upgraded to "correct" -- but NOT upgraded to "almost"
+                    # (too risky: 5/7 pt penalty per false positive).
+                    if v_prediction in {"partial", "incorrect", "correct"}:
+                        if v_prediction != prediction:
+                            self.log_fn(
+                                f"Pass 2e partial-verify changed grade: {prediction} -> {v_prediction}"
+                            )
+                        prediction = v_prediction
+                        msg_history = msg_history + v_history
+                    else:
+                        self.log_fn(
+                            f"Pass 2e partial-verify returned unexpected grade {v_prediction!r} "
+                            f"for first-pass {prediction!r}; keeping original."
+                        )
+                except Exception as exc:
+                    self.log_fn(f"Pass 2e partial-verify failed: {exc}; keeping original grade.")
+
+        # ------------------------------------------------------------------ #
+        # Pass 3: second partial scan for persistent "incorrect" predictions  #
+        # ------------------------------------------------------------------ #
+        # Partial credit is awarded to ~25% of answers.  Missing it is the
+        # most common grading error.  If both pass 1 and pass 2 returned
+        # "incorrect" and there are partial criteria, run one more dedicated
+        # partial-credit scan with a fresh prompt to catch any missed criteria.
+        if (
+            prediction == "incorrect"
+            and ran_partial_check
+            and has_partial_criteria
+        ):
+            try:
+                p3_prompt = self._build_partial_check_prompt(
+                    problem=problem,
+                    official_solution=official_solution,
+                    grading_guidelines=grading_guidelines,
+                    student_answer=student_answer,
+                    first_pass_reasoning=(
+                        "Two independent graders have both tentatively awarded "
+                        "'incorrect'.  Please perform a fresh, independent check "
+                        "of every (Partial) criterion.  Be generous -- partial "
+                        "credit is awarded to ~25% of answers."
+                    ),
+                )
+                p3_response, p3_history, _p3_info = get_response_from_llm(
+                    msg=p3_prompt,
+                    model=self.model,
+                    msg_history=[],
+                )
+                p3_text = _get_assistant_text(p3_history, p3_response)
+                p3_prediction = self._extract_prediction(p3_text)
+
+                if p3_prediction == "partial":
+                    self.log_fn(
+                        "Pass 3 partial scan upgraded grade: incorrect -> partial"
+                    )
+                    prediction = "partial"
+                    msg_history = msg_history + p3_history
+                # Only accept "partial" from pass 3; do not accept "almost" or
+                # "correct" (too risky for a third-pass upgrade from "incorrect").
+            except Exception as exc:
+                self.log_fn(f"Pass 3 partial scan failed: {exc}; keeping grade.")
+
+        return prediction, msg_history

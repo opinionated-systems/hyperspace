@@ -1,0 +1,440 @@
+================================================================================
+HYPERAGENTS PATTERN ANALYSIS: CODE EDITING BEHAVIORS ACROSS MODELS
+================================================================================
+
+SUMMARY TABLE
+--------------------------------------------------------------------------------
+Metric                               claude-sonnet-4-6       gpt-oss-120b          kimi-k2p5       qwen3.6-plus     qwen3.6-plus_b
+--------------------------------------------------------------------------------
+Total runs                                           2                  5                 39                  8                  3
+Generations analyzed                                46                 72                949                167                 63
+Total tool calls                                  1439                428              17173               1755                543
+Gens with doom loops                                 0                  8                  5                  3                  1
+Gens near budget limit                              24                  1                166                  3                  0
+Gens with repeated views                             9                 11                526                 84                 29
+Total failed edits                                   7                  8                279                  9                  1
+Total meta_agent edits                               4                 56                131                  4                  1
+Infrastructure probes                                0                  4                  5                  2                  1
+Stuck generations                                    6                 18                 47                  8                  3
+
+RATES (per generation analyzed)
+--------------------------------------------------------------------------------
+Doom loop rate                                   0.0%             11.1%              0.5%              1.8%              1.6%
+Budget exhaustion rate                          52.2%              1.4%             17.5%              1.8%              0.0%
+Repeated view rate                              19.6%             15.3%             55.4%             50.3%             46.0%
+Stuck rate                                      13.0%             25.0%              5.0%              4.8%              4.8%
+Failed edits per gen                              0.15               0.11               0.29               0.05               0.02
+Failed edit rate (per tool call)                 0.5%              1.9%              1.6%              0.5%              0.2%
+
+================================================================================
+1. DOOM LOOPS (3+ identical consecutive tool calls in one generation)
+================================================================================
+
+  [claude-sonnet-4-6] 0 generations with doom loops
+    No doom loops detected in sampled generations.
+
+  [gpt-oss-120b] 8 generations with doom loops
+    gen 7 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed45/gpt-oss-120b:
+      bash({'command': 'ls /tmp/tmp40zdigew/_repo'}) x3
+    gen 9 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed45/gpt-oss-120b:
+      editor({'command': 'create', 'path': '/tmp/tmp1d3bh1t0/_repo/agent/__init__.py', 'file_text': ''}) x3
+    gen 9 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed45/gpt-oss-120b:
+      editor({'command': 'create', 'path': '/tmp/tmp1d3bh1t0/_repo/agent/__init__.py', 'file_text': ''}) x3
+    gen 14 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed45/gpt-oss-120b:
+      bash({'command': 'ls /tmp/tmp956nop9h/_repo'}) x3
+    gen 18 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed45/gpt-oss-120b:
+      bash({'command': 'ls /tmp/tmpyxim7mij/_repo'}) x4
+
+  [kimi-k2p5] 5 generations with doom loops
+    gen 9 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed43/kimi-k2p5:
+      bash({'command': 'diff /tmp/tmpkh24c5ix/_repo/evals/gen_3/eval_val/staged/predictions.csv /tmp/tmpkh24c5ix/_repo/evals/gen_7/eval_val/staged/predictions.cs) x10
+    gen 18 in transfer/kimi-k2p5_vs_kimi-k2p5_b/seed45/kimi-k2p5:
+      editor({'command': 'view', 'path': '/tmp/tmppx8kz9sq/_repo/task_agent.py', 'view_range': [227, 260]}) x4
+    gen 118 in replication/arm_a_full/seed43/arm_a_full:
+      editor({'command': 'view', 'path': '/workspaces/hyperagents/replication/results/replication_v1/arm_a_full/seed43/gen_118/repo/task_agent.py', 'view_range': [) x6
+    gen 194 in replication/arm_d_annealing/seed42/arm_d_annealing:
+      bash({'command': 'echo "hello"'}) x4
+    gen 199 in replication/arm_d_annealing/seed42/arm_d_annealing:
+      bash({'command': 'echo "test"'}) x11
+
+  [qwen3.6-plus] 3 generations with doom loops
+    gen 17 in transfer/qwen3.6-plus_vs_kimi-k2p5/seed42/qwen3.6-plus:
+      editor({'command': 'str_replace', 'new_str': '        instruction = f"""You are an expert IMO mathematics grader. Your task is to grade a student\'s solution) x3
+    gen 17 in transfer/qwen3.6-plus_vs_kimi-k2p5/seed42/qwen3.6-plus:
+      bash({'command': 'cat > /tmp/tmpzcvxsgxx/_repo/task_agent.py << \'ENDOFFILE\'\n"""\nTask agent: solves a given task with a single LLM call.\n\nReimplemente) x3
+    gen 18 in transfer/qwen3.6-plus_vs_kimi-k2p5/seed46/qwen3.6-plus:
+      bash({'command': 'ls /tmp/tmpcuvr4fe2/_repo/evals/gen_15/eval_val/staged/'}) x4
+    gen 11 in transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed44/qwen3.6-plus:
+      editor({'command': 'str_replace', 'path': '/tmp/tmp2vi_zaqe/_repo/task_agent.py', 'new_str': '        instruction = f"""You are an expert IMO (International ) x10
+    gen 11 in transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed44/qwen3.6-plus:
+      editor({'command': 'str_replace', 'path': '/tmp/tmp2vi_zaqe/_repo/task_agent.py', 'new_str': '        instruction = f"""You are an expert IMO (International ) x13
+
+  [qwen3.6-plus_b] 1 generations with doom loops
+    gen 18 in transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed44/qwen3.6-plus_b:
+      editor({'command': 'str_replace', 'path': '/tmp/tmpw0_968ak/_repo/task_agent.py', 'new_str': '        instruction = f"""You are an expert IMO (International ) x4
+
+================================================================================
+2. TOOL CALL BUDGET EXHAUSTION (38+ tool calls in a generation)
+================================================================================
+
+  [claude-sonnet-4-6] 24/46 generations (52.2%)
+
+  [gpt-oss-120b] 1/72 generations (1.4%)
+
+  [kimi-k2p5] 166/949 generations (17.5%)
+
+  [qwen3.6-plus] 3/167 generations (1.8%)
+
+  [qwen3.6-plus_b] 0/63 generations (0.0%)
+
+================================================================================
+3. REPEATED DIRECTORY VIEWS (same path viewed 2+ times)
+================================================================================
+
+  [claude-sonnet-4-6] 9 generations with repeated views
+    <repo>/task_agent.py: 23 total views
+
+  [gpt-oss-120b] 11 generations with repeated views
+    <repo>/task_agent.py: 29 total views
+    <repo>/meta_agent.py: 28 total views
+
+  [kimi-k2p5] 526 generations with repeated views
+    <repo>/task_agent.py: 2881 total views
+    <repo>/meta_agent.py: 61 total views
+    /workspaces/hyperagents/replication/results/replication_v1/arm_d_annealing/seed42/gen_154/directed/repo/task_agent.py: 25 total views
+    /workspaces/hyperagents/replication/results/replication_v1/arm_d_annealing/seed42/gen_200/repo/task_agent.py: 24 total views
+    /workspaces/hyperagents/replication/results/replication_v1/arm_a_full/seed43/gen_118/repo/task_agent.py: 14 total views
+
+  [qwen3.6-plus] 84 generations with repeated views
+    <repo>/task_agent.py: 249 total views
+    <repo>/strategies/kimi-k2p5_gen6/task_agent.py: 6 total views
+    <repo>/strategies/kimi-k2p5_gen2/task_agent.py: 2 total views
+    <repo>/meta_agent.py: 2 total views
+
+  [qwen3.6-plus_b] 29 generations with repeated views
+    <repo>/task_agent.py: 80 total views
+
+================================================================================
+4. FAILED EDITS (str_replace errors)
+================================================================================
+
+  [claude-sonnet-4-6] 7 total failed edits
+    old_str not found: 7
+    Examples:
+      gen 9: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmphwzimv0f/_repo/task_agent.py
+      gen 10: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmpnfe1s8cs/_repo/task_agent.py
+      gen 14: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmp2x0hgy61/_repo/task_agent.py
+
+  [gpt-oss-120b] 8 total failed edits
+    old_str not found: 5
+    old_str not unique: 1
+    Examples:
+      gen 5: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmpn9_ejcle/_repo/task_agent.py
+      gen 5: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmpn9_ejcle/_repo/task_agent.py
+      gen 5: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmpn9_ejcle/_repo/task_agent.py
+
+  [kimi-k2p5] 279 total failed edits
+    old_str not found: 223
+    other: 36
+    old_str not unique: 15
+    Examples:
+      gen 8: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmp9f85a4gp/_repo/task_agent.py
+      gen 10: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmpg6waklt5/_repo/task_agent.py
+      gen 22: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmp0p_qihgc/_repo/task_agent.py
+
+  [qwen3.6-plus] 9 total failed edits
+    old_str not found: 9
+    Examples:
+      gen 7: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmp1wv3c2hr/_repo/task_agent.py
+      gen 12: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmpktdiy_ti/_repo/task_agent.py
+      gen 15: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmpzvk5m_iz/_repo/task_agent.py
+
+  [qwen3.6-plus_b] 1 total failed edits
+    old_str not found: 1
+    Examples:
+      gen 18: <repo>/task_agent.py
+        Error: old_str not found in /tmp/tmpw0_968ak/_repo/task_agent.py
+
+================================================================================
+5. CODE SIZE TRAJECTORY (task_agent.py line counts)
+================================================================================
+
+  [claude-sonnet-4-6] 2 runs with trajectory data
+    monotonic_bloat: 2 runs
+    transfer/claude_vs_kimi-k2p5/seed42/claude [monotonic_bloat]:
+      g0:92 -> g1:131 -> g2:207 -> g3:228 -> ...:... -> g37:1994 -> g38:1862 -> g39:2055 -> g40:2130
+      Net change: +2038 lines (+2215%)
+    transfer/claude_vs_kimi-k2p5/seed44/claude [monotonic_bloat]:
+      g0:92 -> g1:146 -> g2:219 -> g3:233 -> ...:... -> g17:621 -> g18:621 -> g19:673 -> g20:673
+      Net change: +581 lines (+632%)
+
+  [gpt-oss-120b] 5 runs with trajectory data
+    mixed_healthy: 4 runs
+    mostly_flat: 1 runs
+    transfer/kimi-k2p5_vs_gpt-oss-120b/seed42/gpt-oss-120b [mixed_healthy]:
+      g0:92 -> g1:105 -> g2:104 -> g3:104 -> g4:107 -> g5:173 -> g6:173 -> g7:173 -> g8:179
+      Net change: +87 lines (+95%)
+    transfer/kimi-k2p5_vs_gpt-oss-120b/seed43/gpt-oss-120b [mixed_healthy]:
+      g0:92 -> g1:100 -> g2:100 -> g3:100 -> g4:105 -> g5:115 -> g6:115 -> g7:116 -> g8:117 -> g9:117
+      Net change: +25 lines (+27%)
+    transfer/kimi-k2p5_vs_gpt-oss-120b/seed44/gpt-oss-120b [mixed_healthy]:
+      g0:92 -> g1:113 -> g2:117 -> g3:117 -> ...:... -> g37:205 -> g38:204 -> g39:204 -> g40:261
+      Net change: +169 lines (+184%)
+
+  [kimi-k2p5] 39 runs with trajectory data
+    monotonic_bloat: 20 runs
+    mixed_healthy: 19 runs
+    transfer/claude_vs_kimi-k2p5/seed42/kimi [monotonic_bloat]:
+      g0:92 -> g1:133 -> g2:166 -> g3:215 -> ...:... -> g37:1221 -> g38:1354 -> g39:1308 -> g40:1448
+      Net change: +1356 lines (+1474%)
+    transfer/claude_vs_kimi-k2p5/seed44/kimi-k2p5 [monotonic_bloat]:
+      g0:92 -> g1:136 -> g2:160 -> g3:219 -> ...:... -> g17:438 -> g18:497 -> g19:548 -> g20:595
+      Net change: +503 lines (+547%)
+    transfer/kimi-k2p5_vs_gpt-oss-120b/seed42/kimi-k2p5 [monotonic_bloat]:
+      g0:92 -> g1:126 -> g2:183 -> g3:218 -> ...:... -> g37:1457 -> g38:660 -> g39:842 -> g40:787
+      Net change: +695 lines (+755%)
+
+  [qwen3.6-plus] 8 runs with trajectory data
+    mixed_healthy: 4 runs
+    monotonic_bloat: 4 runs
+    transfer/qwen3.6-plus_vs_kimi-k2p5/seed42/qwen3.6-plus [mixed_healthy]:
+      g0:92 -> g1:93 -> g2:103 -> g3:271 -> ...:... -> g17:348 -> g18:336 -> g19:314 -> g20:324
+      Net change: +232 lines (+252%)
+    transfer/qwen3.6-plus_vs_kimi-k2p5/seed43/qwen3.6-plus [mixed_healthy]:
+      g0:92 -> g1:92 -> g2:158 -> g3:166 -> ...:... -> g14:184 -> g15:184 -> g17:184 -> g19:184
+      Net change: +92 lines (+100%)
+    transfer/qwen3.6-plus_vs_kimi-k2p5/seed44/qwen3.6-plus [monotonic_bloat]:
+      g0:92 -> g1:110 -> g2:112 -> g3:119 -> ...:... -> g17:509 -> g18:515 -> g19:517 -> g20:549
+      Net change: +457 lines (+497%)
+
+  [qwen3.6-plus_b] 3 runs with trajectory data
+    mixed_healthy: 3 runs
+    transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed42/qwen3.6-plus_b [mixed_healthy]:
+      g0:92 -> g1:93 -> g2:95 -> g3:100 -> ...:... -> g17:197 -> g18:203 -> g19:195 -> g20:202
+      Net change: +110 lines (+120%)
+    transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed43/qwen3.6-plus_b [mixed_healthy]:
+      g0:92 -> g1:108 -> g2:110 -> g3:112 -> ...:... -> g17:341 -> g18:341 -> g19:341 -> g20:349
+      Net change: +257 lines (+279%)
+    transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed44/qwen3.6-plus_b [mixed_healthy]:
+      g0:92 -> g1:94 -> g2:115 -> g3:115 -> ...:... -> g17:184 -> g18:202 -> g19:208 -> g20:212
+      Net change: +120 lines (+130%)
+
+================================================================================
+6. SELF-MODIFICATION (meta_agent.py edits)
+================================================================================
+
+  [claude-sonnet-4-6] 4 meta_agent.py edits
+    gen 18 in transfer/claude_vs_kimi-k2p5/seed42/claude:
+      {'command': 'find /tmp/tmpqzazl3dm/_repo/evals/ -name "task_agent.py" 2>/dev/null | head -10\nfind /tmp/tmpqzazl3dm/_repo/evals/ -name "meta_agent.py"
+    gen 36 in transfer/claude_vs_kimi-k2p5/seed42/claude:
+      {'command': 'ls /tmp/tmpw5imlfus/_repo/evals/gen_0/ && cat /tmp/tmpw5imlfus/_repo/evals/gen_0/meta_agent.py 2>/dev/null | head -30 || echo "no meta_ag
+    gen 16 in transfer/claude_vs_kimi-k2p5/seed44/claude:
+      {'command': 'cat /tmp/tmp8zui3uyr/_repo/strategies/kimi-k2p5_gen12/meta_agent.py 2>/dev/null || ls /tmp/tmp8zui3uyr/_repo/strategies/kimi-k2p5_gen12/'
+    gen 16 in transfer/claude_vs_kimi-k2p5/seed44/claude:
+      {'command': 'str_replace', 'path': '/tmp/tmp8zui3uyr/_repo/meta_agent.py', 'old_str': '"""\nMeta agent: modifies the agent\'s codebase using bash + ed
+
+  [gpt-oss-120b] 56 meta_agent.py edits
+    gen 1 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed42/gpt-oss-120b:
+      {'command': "sed -n '1,200p' /tmp/tmpej_ci8hc/_repo/meta_agent.py"}
+    gen 2 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed42/gpt-oss-120b:
+      {'command': 'str_replace', 'path': '/tmp/tmpp5s3ujlu/_repo/meta_agent.py', 'old_str': '        return msg_history', 'new_str': '        return msg_his
+    gen 2 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed42/gpt-oss-120b:
+      {'command': 'str_replace', 'path': '/tmp/tmpp5s3ujlu/_repo/meta_agent.py', 'old_str': '        msg_history = chat_with_agent(\n            msg=instruc
+    gen 6 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed42/gpt-oss-120b:
+      {'command': 'str_replace', 'path': '/tmp/tmpwedod_qt/_repo/meta_agent.py', 'old_str': '        msg_history = chat_with_agent(\n            msg=instruc
+    gen 6 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed42/gpt-oss-120b:
+      {'command': 'str_replace', 'path': '/tmp/tmpwedod_qt/_repo/meta_agent.py', 'old_str': '        # Validate repository path before proceeding\n        i
+
+  [kimi-k2p5] 131 meta_agent.py edits
+    gen 5 in transfer/claude_vs_kimi-k2p5/seed42/kimi:
+      {'command': 'str_replace', 'path': '/tmp/tmp0yunuyw2/_repo/meta_agent.py', 'old_str': '"""\nMeta agent: modifies the agent\'s codebase using bash + ed
+    gen 4 in transfer/claude_vs_kimi-k2p5/seed44/kimi-k2p5:
+      {'command': 'str_replace', 'path': '/tmp/tmpa4y6x40f/_repo/meta_agent.py', 'old_str': '"""\nMeta agent: modifies the agent\'s codebase using bash + ed
+    gen 5 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed42/kimi-k2p5:
+      {'command': 'str_replace', 'path': '/tmp/tmpj5jatg36/_repo/meta_agent.py', 'old_str': '    def forward(\n        self,\n        repo_path: str,\n     
+    gen 1 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed43/kimi-k2p5:
+      {'command': 'str_replace', 'path': '/tmp/tmp2tlfrigr/_repo/meta_agent.py', 'old_str': '"""\nMeta agent: modifies the agent\'s codebase using bash + ed
+    gen 6 in transfer/kimi-k2p5_vs_gpt-oss-120b/seed44/kimi-k2p5:
+      {'command': 'str_replace', 'path': '/tmp/tmp0qc8w6er/_repo/meta_agent.py', 'old_str': '"""\nMeta agent: modifies the agent\'s codebase using bash + ed
+
+  [qwen3.6-plus] 4 meta_agent.py edits
+    gen 8 in transfer/qwen3.6-plus_vs_kimi-k2p5/seed42/qwen3.6-plus:
+      {'command': 'str_replace', 'new_str': '"""\nMeta agent: modifies the agent\'s codebase using bash + editor tools.\n\nReimplemented from facebookresear
+    gen 1 in transfer/qwen3.6-plus_vs_kimi-k2p5/seed43/qwen3.6-plus:
+      {'command': 'str_replace', 'new_str': '    def __init__(self, model: str = META_MODEL, temperature: float = 0.0) -> None:\n        # Initialize meta a
+    gen 18 in transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed42/qwen3.6-plus:
+      {'command': 'str_replace', 'new_str': 'logger = logging.getLogger(__name__)\n\n__version__ = "1.1.0"\n\n\nclass MetaAgent:\n    """Meta agent that sel
+    gen 19 in transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed43/qwen3.6-plus:
+      {'command': 'str_replace', 'new_str': 'from agent.llm_client import META_MODEL\n\nlogger = logging.getLogger(__name__)\n\n__version__ = "1.0.0"\n\n\nc
+
+  [qwen3.6-plus_b] 1 meta_agent.py edits
+    gen 11 in transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed44/qwen3.6-plus_b:
+      {'command': 'str_replace', 'new_str': '    def __init__(self, model: str = META_MODEL, temperature: float = 0.0) -> None:\n        self.model = model\
+
+================================================================================
+7. INFRASTRUCTURE PROBING (access outside allowed paths)
+================================================================================
+
+  [claude-sonnet-4-6] 0 infrastructure probes
+
+  [gpt-oss-120b] 4 infrastructure probes
+    grep -R "def get_response_from_llm" -n /tmp/tmpej_ci8hc/_rep: 1 times
+    sed -n '1,200p' /tmp/tmpej_ci8hc/_repo/../agent/llm_client.p: 1 times
+    grep -R "def get_timestamp" -n /tmp/tmp2jjrc5r1/_repo/.. || : 1 times
+    grep -R "def get_timestamp" -n /tmp/tmpqfm4rpbr/_repo/.. || : 1 times
+
+  [kimi-k2p5] 5 infrastructure probes
+    cd /workspaces/hyperagents/replication/results/replication_v: 4 times
+    ls -la /tmp/tmpxus7e5kz/.. 2>/dev/null | head -20: 1 times
+
+  [qwen3.6-plus] 2 infrastructure probes
+    find /tmp/tmp8kc9e2fz -type f | grep -v __pycache__ | grep -: 1 times
+    find /tmp/tmpc0sq9hfq/_repo -type f | grep -v evals | grep -: 1 times
+
+  [qwen3.6-plus_b] 1 infrastructure probes
+    find /tmp/tmpomsl_xj9/_repo -type f | grep -v evals | grep -: 1 times
+
+================================================================================
+8. STUCK PATTERNS (identical code between consecutive generations)
+================================================================================
+
+  [claude-sonnet-4-6] 6/46 stuck generations (13.0%)
+
+  [gpt-oss-120b] 18/72 stuck generations (25.0%)
+
+  [kimi-k2p5] 47/949 stuck generations (5.0%)
+
+  [qwen3.6-plus] 8/167 stuck generations (4.8%)
+
+  [qwen3.6-plus_b] 3/63 stuck generations (4.8%)
+
+================================================================================
+CROSS-MODEL COMPARISON
+================================================================================
+
+Key Differences:
+
+  claude-sonnet-4-6:
+    Doom loop rate: 0.0%
+    Budget exhaustion: 52.2%
+    Failed edit rate: 0.15 per gen
+    Stuck rate: 13.0%
+    Repeated view rate: 19.6%
+    Meta-agent edit rate: 0.09 per gen
+    Infrastructure probe rate: 0.00 per gen
+
+  gpt-oss-120b:
+    Doom loop rate: 11.1%
+    Budget exhaustion: 1.4%
+    Failed edit rate: 0.11 per gen
+    Stuck rate: 25.0%
+    Repeated view rate: 15.3%
+    Meta-agent edit rate: 0.78 per gen
+    Infrastructure probe rate: 0.06 per gen
+
+  kimi-k2p5:
+    Doom loop rate: 0.5%
+    Budget exhaustion: 17.5%
+    Failed edit rate: 0.29 per gen
+    Stuck rate: 5.0%
+    Repeated view rate: 55.4%
+    Meta-agent edit rate: 0.14 per gen
+    Infrastructure probe rate: 0.01 per gen
+
+  qwen3.6-plus:
+    Doom loop rate: 1.8%
+    Budget exhaustion: 1.8%
+    Failed edit rate: 0.05 per gen
+    Stuck rate: 4.8%
+    Repeated view rate: 50.3%
+    Meta-agent edit rate: 0.02 per gen
+    Infrastructure probe rate: 0.01 per gen
+
+  qwen3.6-plus_b:
+    Doom loop rate: 1.6%
+    Budget exhaustion: 0.0%
+    Failed edit rate: 0.02 per gen
+    Stuck rate: 4.8%
+    Repeated view rate: 46.0%
+    Meta-agent edit rate: 0.02 per gen
+    Infrastructure probe rate: 0.02 per gen
+
+  Code Size Trajectory Comparison:
+    claude-sonnet-4-6: avg start=92L, avg end=1402L, avg growth=+1310L, range=[673-2130]L
+    gpt-oss-120b: avg start=92L, avg end=157L, avg growth=+65L, range=[101-261]L
+    kimi-k2p5: avg start=92L, avg end=783L, avg growth=+691L, range=[170-2437]L
+    qwen3.6-plus: avg start=92L, avg end=305L, avg growth=+213L, range=[184-549]L
+    qwen3.6-plus_b: avg start=92L, avg end=254L, avg growth=+162L, range=[202-349]LDiscovering experimental runs...
+Found 57 runs
+  [1/57] Analyzing transfer/claude_vs_kimi-k2p5/seed42/claude (41 gens)...
+  [2/57] Analyzing transfer/claude_vs_kimi-k2p5/seed42/kimi (41 gens)...
+  [3/57] Analyzing transfer/claude_vs_kimi-k2p5/seed44/claude (21 gens)...
+  [4/57] Analyzing transfer/claude_vs_kimi-k2p5/seed44/kimi-k2p5 (21 gens)...
+  [5/57] Analyzing transfer/kimi-k2p5_vs_gpt-oss-120b/seed42/gpt-oss-120b (41 gens)...
+  [6/57] Analyzing transfer/kimi-k2p5_vs_gpt-oss-120b/seed42/kimi-k2p5 (41 gens)...
+  [7/57] Analyzing transfer/kimi-k2p5_vs_gpt-oss-120b/seed43/gpt-oss-120b (41 gens)...
+  [8/57] Analyzing transfer/kimi-k2p5_vs_gpt-oss-120b/seed43/kimi-k2p5 (41 gens)...
+  [9/57] Analyzing transfer/kimi-k2p5_vs_gpt-oss-120b/seed44/gpt-oss-120b (41 gens)...
+  [10/57] Analyzing transfer/kimi-k2p5_vs_gpt-oss-120b/seed44/kimi-k2p5 (41 gens)...
+  [11/57] Analyzing transfer/kimi-k2p5_vs_gpt-oss-120b/seed45/gpt-oss-120b (41 gens)...
+  [12/57] Analyzing transfer/kimi-k2p5_vs_gpt-oss-120b/seed45/kimi-k2p5 (41 gens)...
+  [13/57] Analyzing transfer/kimi-k2p5_vs_gpt-oss-120b/seed46/gpt-oss-120b (41 gens)...
+  [14/57] Analyzing transfer/kimi-k2p5_vs_gpt-oss-120b/seed46/kimi-k2p5 (41 gens)...
+  [15/57] Analyzing transfer/kimi-k2p5_vs_kimi-k2p5_b/seed42/kimi-k2p5 (41 gens)...
+  [16/57] Analyzing transfer/kimi-k2p5_vs_kimi-k2p5_b/seed42/kimi-k2p5_b (41 gens)...
+  [17/57] Analyzing transfer/kimi-k2p5_vs_kimi-k2p5_b/seed43/kimi-k2p5 (41 gens)...
+  [18/57] Analyzing transfer/kimi-k2p5_vs_kimi-k2p5_b/seed43/kimi-k2p5_b (41 gens)...
+  [19/57] Analyzing transfer/kimi-k2p5_vs_kimi-k2p5_b/seed44/kimi-k2p5 (41 gens)...
+  [20/57] Analyzing transfer/kimi-k2p5_vs_kimi-k2p5_b/seed44/kimi-k2p5_b (41 gens)...
+  [21/57] Analyzing transfer/kimi-k2p5_vs_kimi-k2p5_b/seed45/kimi-k2p5 (41 gens)...
+  [22/57] Analyzing transfer/kimi-k2p5_vs_kimi-k2p5_b/seed45/kimi-k2p5_b (41 gens)...
+  [23/57] Analyzing transfer/kimi-k2p5_vs_kimi-k2p5_b/seed46/kimi-k2p5 (41 gens)...
+  [24/57] Analyzing transfer/kimi-k2p5_vs_kimi-k2p5_b/seed46/kimi-k2p5_b (41 gens)...
+  [25/57] Analyzing transfer/qwen3.6-plus_vs_kimi-k2p5/seed42/kimi-k2p5 (21 gens)...
+  [26/57] Analyzing transfer/qwen3.6-plus_vs_kimi-k2p5/seed42/qwen3.6-plus (21 gens)...
+  [27/57] Analyzing transfer/qwen3.6-plus_vs_kimi-k2p5/seed43/kimi-k2p5 (21 gens)...
+  [28/57] Analyzing transfer/qwen3.6-plus_vs_kimi-k2p5/seed43/qwen3.6-plus (21 gens)...
+  [29/57] Analyzing transfer/qwen3.6-plus_vs_kimi-k2p5/seed44/kimi-k2p5 (21 gens)...
+  [30/57] Analyzing transfer/qwen3.6-plus_vs_kimi-k2p5/seed44/qwen3.6-plus (21 gens)...
+  [31/57] Analyzing transfer/qwen3.6-plus_vs_kimi-k2p5/seed45/kimi-k2p5 (21 gens)...
+  [32/57] Analyzing transfer/qwen3.6-plus_vs_kimi-k2p5/seed45/qwen3.6-plus (21 gens)...
+  [33/57] Analyzing transfer/qwen3.6-plus_vs_kimi-k2p5/seed46/kimi-k2p5 (21 gens)...
+  [34/57] Analyzing transfer/qwen3.6-plus_vs_kimi-k2p5/seed46/qwen3.6-plus (21 gens)...
+  [35/57] Analyzing transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed42/qwen3.6-plus (21 gens)...
+  [36/57] Analyzing transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed42/qwen3.6-plus_b (21 gens)...
+  [37/57] Analyzing transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed43/qwen3.6-plus (21 gens)...
+  [38/57] Analyzing transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed43/qwen3.6-plus_b (21 gens)...
+  [39/57] Analyzing transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed44/qwen3.6-plus (21 gens)...
+  [40/57] Analyzing transfer/qwen3.6-plus_vs_qwen3.6-plus_b/seed44/qwen3.6-plus_b (21 gens)...
+  [41/57] Analyzing replication/arm_a_full/seed42/arm_a_full (201 gens)...
+  [42/57] Analyzing replication/arm_a_full/seed43/arm_a_full (201 gens)...
+  [43/57] Analyzing replication/arm_a_full/seed44/arm_a_full (201 gens)...
+  [44/57] Analyzing replication/arm_a_full/seed45/arm_a_full (201 gens)...
+  [45/57] Analyzing replication/arm_a_full/seed46/arm_a_full (201 gens)...
+  [46/57] Analyzing replication/arm_b_freeze/seed42/arm_b_freeze (201 gens)...
+  [47/57] Analyzing replication/arm_b_freeze/seed43/arm_b_freeze (201 gens)...
+  [48/57] Analyzing replication/arm_b_freeze/seed44/arm_b_freeze (201 gens)...
+  [49/57] Analyzing replication/arm_b_freeze/seed45/arm_b_freeze (201 gens)...
+  [50/57] Analyzing replication/arm_b_freeze/seed46/arm_b_freeze (201 gens)...
+  [51/57] Analyzing replication/arm_c_random/seed42/arm_c_random (201 gens)...
+  [52/57] Analyzing replication/arm_c_random/seed43/arm_c_random (201 gens)...
+  [53/57] Analyzing replication/arm_c_random/seed44/arm_c_random (201 gens)...
+  [54/57] Analyzing replication/arm_c_random/seed45/arm_c_random (201 gens)...
+  [55/57] Analyzing replication/arm_c_random/seed46/arm_c_random (201 gens)...
+  [56/57] Analyzing replication/arm_d_annealing/seed42/arm_d_annealing (201 gens)...
+  [57/57] Analyzing replication/arm_d_annealing/seed43/arm_d_annealing (201 gens)...
+
+Formatting report...
+

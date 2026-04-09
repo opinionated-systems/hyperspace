@@ -1,0 +1,773 @@
+"""
+Task agent: solves a given task with chain-of-thought reasoning.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    Also handles nested JSON objects, markdown code blocks, and common LLM formatting errors.
+    
+    Args:
+        text: The text containing <json>...</json> blocks.
+        
+    Returns:
+        A list of parsed JSON dicts, or None if no valid JSON found.
+    """
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        
+        # Try to parse the inner content as JSON
+        try:
+            results.append(json.loads(inner))
+            continue
+        except json.JSONDecodeError:
+            pass
+        
+        # Try to extract JSON from markdown code blocks within the content
+        code_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', inner, re.DOTALL)
+        if code_block_match:
+            try:
+                results.append(json.loads(code_block_match.group(1)))
+                continue
+            except json.JSONDecodeError:
+                pass
+        
+        # Try to find raw JSON object with proper brace matching
+        try:
+            json_str = _extract_json_with_brace_matching(inner)
+            if json_str:
+                results.append(json.loads(json_str))
+                continue
+        except (json.JSONDecodeError, ValueError):
+            pass
+                
+        # Try to clean common LLM formatting errors and re-parse
+        try:
+            cleaned = _clean_json_string(inner)
+            if cleaned:
+                results.append(json.loads(cleaned))
+                continue
+        except (json.JSONDecodeError, ValueError):
+            pass
+                
+    return results or None
+
+
+def _extract_json_with_brace_matching(text: str) -> str | None:
+    """Extract JSON object using proper brace matching.
+    
+    This handles nested braces correctly by counting open/close braces.
+    
+    Args:
+        text: Text that may contain a JSON object.
+        
+    Returns:
+        The extracted JSON string, or None if no valid object found.
+    """
+    # Find the first opening brace
+    start = text.find('{')
+    if start == -1:
+        return None
+    
+    brace_count = 0
+    in_string = False
+    escape_next = False
+    end = start
+    
+    for i in range(start, len(text)):
+        char = text[i]
+        
+        if escape_next:
+            escape_next = False
+            continue
+            
+        if char == '\\':
+            escape_next = True
+            continue
+            
+        if char == '"' and not in_string:
+            in_string = True
+        elif char == '"' and in_string:
+            in_string = False
+        elif not in_string:
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    end = i + 1
+                    break
+    
+    if brace_count == 0 and end > start:
+        return text[start:end]
+    return None
+
+
+def _clean_json_string(text: str) -> str | None:
+    """Clean common LLM formatting errors from JSON strings.
+    
+    Args:
+        text: Potentially malformed JSON string.
+        
+    Returns:
+        Cleaned JSON string, or None if cleaning failed.
+    """
+    # Remove leading/trailing whitespace and newlines
+    cleaned = text.strip()
+    
+    # Remove trailing commas before closing braces/brackets
+    cleaned = re.sub(r',(\s*[}\]])', r'\1', cleaned)
+    
+    # Fix single quotes to double quotes (common LLM error)
+    # Only replace quotes that are not inside strings
+    result = []
+    in_string = False
+    escape_next = False
+    for char in cleaned:
+        if escape_next:
+            result.append(char)
+            escape_next = False
+            continue
+        if char == '\\':
+            result.append(char)
+            escape_next = True
+            continue
+        if char == '"' and not in_string:
+            in_string = True
+            result.append(char)
+        elif char == '"' and in_string:
+            in_string = False
+            result.append(char)
+        elif char == "'" and not in_string:
+            result.append('"')
+        else:
+            result.append(char)
+    cleaned = ''.join(result)
+    
+    # Remove comments (// style)
+    cleaned = re.sub(r'//[^\n]*', '', cleaned)
+    
+    # Remove comments (/* */ style)
+    cleaned = re.sub(r'/\*.*?\*/', '', cleaned, flags=re.DOTALL)
+    
+    # Validate by trying to parse
+    try:
+        json.loads(cleaned)
+        return cleaned
+    except json.JSONDecodeError:
+        return None
+
+
+def _extract_json_fallback(text: str) -> dict | None:
+    """Fallback JSON extraction for non-tagged JSON or markdown code blocks.
+
+    Tries to find JSON in markdown code blocks or raw JSON objects.
+    Uses robust brace-matching and cleaning to handle nested structures and LLM errors.
+    
+    Args:
+        text: The text to search for JSON objects.
+        
+    Returns:
+        A parsed JSON dict if found, None otherwise.
+        
+    Priority:
+        1. Markdown code blocks with JSON
+        2. Raw JSON objects with expected keys (response, grade, score, etc.)
+        3. Any valid JSON object
+        4. Cleaned JSON with common LLM errors fixed
+    """
+    # First try markdown code blocks
+    patterns = [
+        r'```json\s*(.*?)\s*```',  # Markdown JSON blocks
+        r'```\s*(\{.*?\})\s*```',  # Generic code blocks with JSON
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.DOTALL)
+        for match in matches:
+            try:
+                return json.loads(match)
+            except json.JSONDecodeError:
+                # Try cleaning the match
+                cleaned = _clean_json_string(match)
+                if cleaned:
+                    return json.loads(cleaned)
+                continue
+    
+    # Try to find JSON objects by matching braces with proper nesting
+    json_candidates = []
+    
+    # Find all potential JSON object starts
+    for match in re.finditer(r'\{\s*"', text):
+        start = match.start()
+        json_str = _extract_json_with_brace_matching(text[start:])
+        if json_str:
+            try:
+                parsed = json.loads(json_str)
+                json_candidates.append(parsed)
+            except json.JSONDecodeError:
+                # Try cleaning
+                cleaned = _clean_json_string(json_str)
+                if cleaned:
+                    try:
+                        json_candidates.append(json.loads(cleaned))
+                    except json.JSONDecodeError:
+                        pass
+    
+    # Also try to find and clean any JSON-like structures
+    # Look for patterns that might be JSON with errors
+    potential_json = re.search(r'\{[\s\S]{10,500}\}', text)
+    if potential_json:
+        cleaned = _clean_json_string(potential_json.group(0))
+        if cleaned:
+            try:
+                parsed = json.loads(cleaned)
+                json_candidates.append(parsed)
+            except json.JSONDecodeError:
+                pass
+    
+    # Prioritize candidates with expected keys
+    priority_keys = ['response', 'grade', 'score', 'answer', 'result', 'value']
+    for key in priority_keys:
+        for candidate in json_candidates:
+            if key in candidate:
+                return candidate
+    
+    # Return first valid candidate if any
+    if json_candidates:
+        return json_candidates[0]
+    
+    return None
+
+
+def _validate_and_normalize_prediction(prediction: str, grading_guidelines: str) -> str:
+    """Validate and normalize the prediction based on grading guidelines.
+    
+    Ensures the prediction matches expected format from grading guidelines.
+    Handles various edge cases and normalizes common variations.
+    Prioritizes extracting the exact label format from grading guidelines.
+    """
+    if not prediction or prediction.strip() == "":
+        return "None"
+    
+    prediction = prediction.strip()
+    
+    # Remove surrounding quotes if present
+    if (prediction.startswith('"') and prediction.endswith('"')) or \
+       (prediction.startswith("'") and prediction.endswith("'")):
+        prediction = prediction[1:-1].strip()
+    
+    # Remove common prefixes that LLMs sometimes add
+    prefixes_to_remove = [
+        "the answer is", "answer:", "score:", "grade:", 
+        "final answer:", "prediction:", "result:", "output:",
+        "the grade is", "the score is", "i would give",
+        "therefore,", "thus,", "so,", "conclusion:",
+        "evaluation:", "assessment:", "verdict:", "decision:"
+    ]
+    pred_lower = prediction.lower()
+    for prefix in prefixes_to_remove:
+        if pred_lower.startswith(prefix):
+            prediction = prediction[len(prefix):].strip()
+            pred_lower = prediction.lower()
+            break
+    
+    # Remove trailing punctuation (but preserve parentheses for labels)
+    prediction = prediction.rstrip('.;:,!?')
+    pred_lower = prediction.lower()
+    
+    # Handle common truncation patterns first
+    # These are common when the model cuts off the response
+    if pred_lower in ["in", "incor", "incorr", "incorre", "incorrec"]:
+        return "Incorrect"
+    if pred_lower in ["cor", "corr", "corre", "correc"]:
+        return "Correct"
+    if pred_lower in ["par", "part", "parti", "partia"]:
+        return "Partial"
+    if pred_lower in ["alm", "almo", "almos"]:
+        return "Almost"
+    
+    # FIRST: Extract exact label formats from grading guidelines
+    # Look for categorical labels like (Correct), (Partial), (Almost), (Incorrect)
+    guideline_labels = []
+    
+    # Pattern for parenthesized labels: (Correct), (Partial), etc.
+    parenthesized_pattern = r'\(([A-Za-z]+)\)'
+    for match in re.finditer(parenthesized_pattern, grading_guidelines):
+        label = match.group(1)
+        if label not in guideline_labels:
+            guideline_labels.append(label)
+    
+    # Pattern for labels without parentheses: Correct, Partial, etc.
+    # Match standalone capitalized words that appear to be labels
+    standalone_pattern = r'(?:^|\n|\s)\s*([A-Z][a-z]+)\s*(?:\n|$|\d+\.|\s)'
+    for match in re.finditer(standalone_pattern, grading_guidelines):
+        label = match.group(1)
+        if label not in guideline_labels and label not in ["The", "A", "An", "This", "That"]:
+            guideline_labels.append(label)
+    
+    # If we found categorical labels in guidelines, use them for validation
+    if guideline_labels:
+        # Check for exact match (case-insensitive) - highest priority
+        for label in guideline_labels:
+            if pred_lower == label.lower():
+                return label
+        
+        # Check for exact match with parentheses
+        for label in guideline_labels:
+            if pred_lower == f"({label.lower()})":
+                return label
+    
+    # SECOND: Handle specific known grading formats with improved logic
+    # CRITICAL: Check Partial and Almost BEFORE Correct/Incorrect to avoid
+    # misclassifying phrases like "partially correct" or "almost correct" as "Correct"
+    
+    # Check for "Partial" format - MUST CHECK BEFORE "Correct" to handle "partially correct"
+    if "partial" in grading_guidelines.lower():
+        if pred_lower == "partial":
+            return "Partial"
+        # Check for partial synonyms BEFORE any "correct" checks
+        # These indicate meaningful progress but incomplete solution
+        partial_synonyms = [
+            "incomplete", "some progress", "partially correct", "partial credit",
+            "partial solution", "partial proof", "partial result", "incomplete proof",
+            "incomplete solution", "missing steps", "gaps remain", "not complete",
+            "not fully proven", "not established", "missing key", "significant gaps",
+            "valid intermediate", "meaningful progress", "approach started",
+            "proven lemmas", "correct setup", "wrong conclusion", "partially",
+            "partially proven", "partially solved", "incomplete work", "not proven",
+            "not fully", "not complete", "lacks proof", "missing proof"
+        ]
+        for synonym in partial_synonyms:
+            if synonym in pred_lower:
+                return "Partial"
+        if "partial" in pred_lower:
+            return "Partial"
+    
+    # Check for "Almost" format - MUST CHECK BEFORE "Correct" to handle "almost correct"
+    if "almost" in grading_guidelines.lower():
+        if pred_lower == "almost":
+            return "Almost"
+        # Check for almost synonyms BEFORE any "correct" checks
+        # These indicate very close to correct with only minor issues
+        almost_synonyms = [
+            "nearly", "close", "minor error", "small gap", "almost correct",
+            "almost complete", "mostly correct", "nearly complete", "very close",
+            "small mistake", "single error", "one missing", "trivial case",
+            "minor gap", "small calculation", "notation error", "localized error",
+            "doesn't invalidate", "with minor fixes", "essentially correct",
+            "mostly", "nearly proven", "nearly solved", "minor issue", "tiny error",
+            "small error", "one error", "minor mistake", "slight error",
+            "essentially proven", "essentially complete", "minor flaw",
+            "small flaw", "one flaw", "trivial error", "insignificant error"
+        ]
+        for synonym in almost_synonyms:
+            if synonym in pred_lower:
+                return "Almost"
+        if "almost" in pred_lower:
+            return "Almost"
+    
+    # Check for "Correct"/"Incorrect" format with better precision
+    # ONLY check these AFTER Partial and Almost to avoid misclassification
+    if "correct" in grading_guidelines.lower() or "incorrect" in grading_guidelines.lower():
+        # Check for exact matches first - highest priority
+        if pred_lower == "correct":
+            return "Correct"
+        if pred_lower == "incorrect":
+            return "Incorrect"
+        # Check for exact match with "not correct" - should be Incorrect
+        if pred_lower == "not correct":
+            return "Incorrect"
+        # Check for synonyms that mean "Incorrect" - check BEFORE "correct" synonyms
+        # This prevents over-classification as "Correct"
+        incorrect_synonyms = ["wrong", "false", "error", "invalid", "unsolved", "failed", "fail", 
+                              "not correct", "not right", "not valid", "not true", "bad", "rejected",
+                              "does not prove", "doesn't prove", "failed to", "unable to"]
+        for synonym in incorrect_synonyms:
+            if synonym in pred_lower:
+                return "Incorrect"
+        # Check for synonyms that mean "Correct"
+        correct_synonyms = ["full", "complete", "right", "true", "valid", "perfect", "solved",
+                           "good", "accepted", "proper", "accurate"]
+        for synonym in correct_synonyms:
+            if synonym in pred_lower:
+                return "Correct"
+        # Then check for partial matches - check "incorrect" BEFORE "correct"
+        # to avoid misclassifying "not correct" or similar as "Correct"
+        if "incorrect" in pred_lower:
+            return "Incorrect"
+        if "correct" in pred_lower:
+            return "Correct"
+    
+    # Check for Yes/No format
+    if re.search(r'\b(yes|no)\b', grading_guidelines, re.IGNORECASE):
+        if pred_lower == "yes":
+            return "Yes"
+        if pred_lower == "no":
+            return "No"
+        if re.search(r'\byes\b', pred_lower):
+            return "Yes"
+        elif re.search(r'\bno\b', pred_lower):
+            return "No"
+    
+    # Check for Pass/Fail format
+    if re.search(r'\b(pass|fail)\b', grading_guidelines, re.IGNORECASE):
+        if pred_lower == "pass":
+            return "Pass"
+        if pred_lower == "fail":
+            return "Fail"
+        if re.search(r'\bpass\b', pred_lower):
+            return "Pass"
+        elif re.search(r'\bfail\b', pred_lower):
+            return "Fail"
+    
+    # THIRD: Handle numeric scoring formats
+    
+    # Extract expected score patterns from grading guidelines
+    # Common IMO patterns: "7" (full score), "0" (no score), "1-6" (partial)
+    if re.search(r'\b[0-7]\b', grading_guidelines):
+        # IMO-style 0-7 scoring - look for single digit 0-7
+        match = re.search(r'\b([0-7])\b', prediction)
+        if match:
+            return match.group(1)
+        # Also check for spelled-out numbers
+        number_words = {"zero": "0", "one": "1", "two": "2", "three": "3", 
+                       "four": "4", "five": "5", "six": "6", "seven": "7",
+                       "0 points": "0", "1 point": "1", "2 points": "2",
+                       "3 points": "3", "4 points": "4", "5 points": "5",
+                       "6 points": "6", "7 points": "7"}
+        for word, digit in number_words.items():
+            if re.search(rf'\b{word}\b', pred_lower):
+                return digit
+    
+    # Check for numeric ranges in guidelines (e.g., "0-100", "1-10")
+    range_match = re.search(r'(\d+)\s*-\s*(\d+)', grading_guidelines)
+    if range_match:
+        min_val, max_val = int(range_match.group(1)), int(range_match.group(2))
+        # Look for a number in the prediction within the range
+        num_match = re.search(r'\b(\d+)\b', prediction)
+        if num_match:
+            val = int(num_match.group(1))
+            if min_val <= val <= max_val:
+                return str(val)
+    
+    # If prediction is just a number, return it as-is
+    if re.match(r'^-?\d+(\.\d+)?$', prediction):
+        return prediction
+    
+    return prediction
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems with chain-of-thought reasoning."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract fields for structured prompting
+        domain = inputs.get("domain", "")
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+
+        instruction = f"""You are an expert grader for the International Mathematical Olympiad (IMO). Your task is to critically evaluate the student's answer and assign the appropriate grade based on the grading guidelines.
+
+## Domain
+{domain}
+
+## Problem Statement
+{problem}
+
+## Official Solution
+{solution}
+
+## Grading Guidelines
+{grading_guidelines}
+
+## Student's Answer
+{student_answer}
+
+## Your Task
+
+Analyze the student's answer step by step:
+1. Understand what the problem requires and what constitutes a complete, correct solution
+2. Compare the student's work to the official solution - identify ALL errors, gaps, and incorrect reasoning
+3. Check if the student has proven ALL required claims or if key steps are missing
+4. Look for logical errors, calculation mistakes, incomplete proofs, and unjustified assertions
+5. Apply the grading guidelines strictly to determine the appropriate grade
+
+## DETAILED GRADING RUBRIC WITH EXAMPLES
+
+**"Correct"** - ONLY when the solution is 100% complete and rigorous
+- ALL required claims are fully proven with no gaps
+- The reasoning is logically sound throughout
+- No significant errors or omissions exist
+- The solution matches the official solution's completeness
+- Example: A complete proof with all steps justified, all cases covered, and no errors.
+
+**"Incorrect"** - When the solution has fundamental flaws or makes no meaningful progress
+- The approach is completely wrong or misguided
+- Key claims are false or unproven
+- The solution makes no meaningful progress on the problem
+- Major parts of the proof are missing or invalid
+- Example: A solution that claims the answer without proof, or uses a completely wrong approach.
+
+**"Partial"** - When there is meaningful progress but SIGNIFICANT gaps remain
+- Some valid intermediate results or lemmas are proven
+- There is a valid approach started but NOT completed
+- The main result is NOT fully established
+- Significant gaps remain - the proof is incomplete
+- Examples: 
+  * Proven some lemmas but failed to prove the main result
+  * Correct setup and approach but execution fails
+  * Missing key arguments or steps
+  * Has the right idea but the proof is incomplete
+  * Made progress but the conclusion is wrong or missing
+
+**"Almost"** - When the solution is NEARLY complete with only MINOR issues
+- The main ideas and strategy are correct
+- The proof structure is sound and logical
+- The main result IS essentially proven
+- Only MINOR gaps or small errors exist
+- The errors are LOCALIZED and don't invalidate the main result
+- With minor fixes, the solution would be "Correct"
+- Examples:
+  * One small calculation error in an otherwise correct proof
+  * Missing one trivial case that doesn't affect the main argument
+  * Minor notation error that doesn't affect logic
+  * Small gap in reasoning that is easily fixable
+  * One localized mistake in an otherwise complete solution
+
+## CRITICAL DECISION FRAMEWORK - FOLLOW THIS EXACTLY
+
+**STEP 1: Check if the main result is fully proven**
+- If NO → "Partial" or "Incorrect" (go to Step 2)
+- If YES → "Correct" or "Almost" (go to Step 3)
+
+**STEP 2: Main result NOT proven - choose between "Partial" and "Incorrect"**
+- Does the solution make MEANINGFUL progress? (valid lemmas, correct approach started)
+  * If YES → "Partial"
+  * If NO → "Incorrect"
+
+**STEP 3: Main result IS proven - choose between "Correct" and "Almost"**
+- Are there ANY errors, gaps, or issues?
+  * If NO errors at all → "Correct"
+  * If MINOR/SMALL issues only → "Almost"
+  * If SIGNIFICANT issues → "Partial" (go back - main result not actually proven)
+
+## KEY DISTINCTIONS - READ CAREFULLY
+
+**"Partial" vs "Almost" - THIS IS THE MOST COMMON MISTAKE**
+- "Partial": Main result NOT proven, significant work done but major gaps remain
+- "Almost": Main result IS proven, only minor issues exist
+- WHEN IN DOUBT: If you're not sure if the main result is proven, choose "Partial"
+
+**"Almost" vs "Correct"**
+- "Correct": Absolutely no errors, 100% rigorous
+- "Almost": One or two minor issues that don't affect the main result
+- "Almost" should be used when the solution is "essentially correct" with small flaws
+
+## CRITICAL RULES - VIOLATING THESE WILL CAUSE ERRORS
+1. **Be STRICT and CONSERVATIVE** - When in doubt, choose the LOWER grade
+2. **"Correct" is RARE** - Only for truly complete, rigorous solutions
+3. **"Almost" requires the main result to be proven** - If main result is not proven, use "Partial"
+4. **"Partial" is for incomplete solutions with some progress** - Not for nearly-complete solutions
+5. **"Incorrect" is for solutions with no meaningful progress** - Not for solutions with some valid steps
+6. **ALWAYS verify the main result is proven before using "Correct" or "Almost"**
+
+## EXAMPLES OF COMMON MISTAKES TO AVOID
+
+**DON'T say "Almost" when:**
+- The main result is not proven → Use "Partial"
+- There are multiple errors or gaps → Use "Partial"
+- The proof structure is incomplete → Use "Partial"
+- Only some lemmas are proven → Use "Partial"
+
+**DON'T say "Partial" when:**
+- The solution is essentially complete with one tiny error → Use "Almost"
+- The main result is proven with only a minor notation issue → Use "Almost"
+
+**DON'T say "Correct" when:**
+- There are any errors or gaps → Use "Almost" or "Partial"
+- The proof is missing justifications → Use "Partial" or "Almost"
+
+**DON'T say "Incorrect" when:**
+- Some valid progress was made → Use "Partial"
+
+Respond in this exact JSON format wrapped in <json> tags:
+<json>
+{{
+    "reasoning": "Your detailed analysis here. Explicitly state what is correct AND what is wrong or missing...",
+    "response": "GRADE_HERE"
+}}
+</json>
+
+CRITICAL:
+- The "response" field must contain ONLY the exact grade: "Correct", "Incorrect", "Partial", or "Almost" (or a numeric score if specified in guidelines).
+- Do NOT add any extra text, explanations, quotes, or formatting in the "response" field.
+- Use ONLY these exact grade values.
+- Remember: When uncertain, choose the LOWER grade."""
+
+        response, msg_history, info = get_response_from_llm(
+            msg=instruction,
+            model=self.model,
+            msg_history=[],
+        )
+
+        # Extract prediction from JSON
+        prediction = "None"
+        last_text = msg_history[-1]["text"] if msg_history else ""
+        extraction_method = "none"
+        
+        try:
+            # First try: extract from <json> tags
+            extracted = _extract_jsons(last_text)
+            if extracted:
+                extraction_method = "json_tags"
+                # Try to get response field, fall back to other common fields
+                last_json = extracted[-1]
+                if "response" in last_json:
+                    prediction = str(last_json["response"])
+                elif "grade" in last_json:
+                    prediction = str(last_json["grade"])
+                elif "score" in last_json:
+                    prediction = str(last_json["score"])
+                elif "answer" in last_json:
+                    prediction = str(last_json["answer"])
+                elif "result" in last_json:
+                    prediction = str(last_json["result"])
+                elif "value" in last_json:
+                    prediction = str(last_json["value"])
+                else:
+                    # If no recognized field, use the whole JSON as string
+                    prediction = json.dumps(last_json)
+            else:
+                # Second try: fallback extraction for non-tagged JSON
+                fallback = _extract_json_fallback(last_text)
+                if fallback:
+                    extraction_method = "fallback"
+                    if "response" in fallback:
+                        prediction = str(fallback["response"])
+                    elif "grade" in fallback:
+                        prediction = str(fallback["grade"])
+                    elif "score" in fallback:
+                        prediction = str(fallback["score"])
+                    elif "answer" in fallback:
+                        prediction = str(fallback["answer"])
+                    elif "result" in fallback:
+                        prediction = str(fallback["result"])
+                    elif "value" in fallback:
+                        prediction = str(fallback["value"])
+                    else:
+                        prediction = json.dumps(fallback)
+                    self.log_fn(f"Used fallback JSON extraction: {prediction}")
+                else:
+                    # Third try: direct text extraction for simple responses
+                    extraction_method = "direct"
+                    # Look for the last line that might be the answer
+                    lines = [line.strip() for line in last_text.split('\n') if line.strip()]
+                    if lines:
+                        # Check if the last non-empty line looks like a simple answer
+                        last_line = lines[-1]
+                        if len(last_line) < 50 and not last_line.startswith('{') and not last_line.startswith('<'):
+                            prediction = last_line
+                            self.log_fn(f"Used direct text extraction: {prediction}")
+            
+            # Validate and normalize the prediction
+            original_prediction = prediction
+            prediction = _validate_and_normalize_prediction(prediction, grading_guidelines)
+            
+            if original_prediction != prediction:
+                self.log_fn(f"Normalized prediction from '{original_prediction}' to '{prediction}'")
+            
+            self.log_fn(f"Extraction method: {extraction_method}, final prediction: {prediction}")
+            
+        except Exception as e:
+            self.log_fn(f"Error extracting prediction: {e}")
+            # Last resort: try to find any numeric or keyword answer in the text
+            try:
+                # Look for IMO scores (0-7)
+                score_match = re.search(r'\b([0-7])\b', last_text)
+                if score_match:
+                    prediction = score_match.group(1)
+                    self.log_fn(f"Used regex extraction for score: {prediction}")
+            except Exception:
+                pass
+
+        # Final validation: ensure prediction is one of the expected grades
+        valid_grades = ["Correct", "Incorrect", "Partial", "Almost"]
+        if prediction not in valid_grades:
+            # Try to extract grade from the text one more time with priority order
+            # Check for "Almost" first to avoid matching "Correct" in "almost correct"
+            priority_grades = ["Almost", "Partial", "Incorrect", "Correct"]
+            for grade in priority_grades:
+                if re.search(rf'\b{grade}\b', last_text, re.IGNORECASE):
+                    self.log_fn(f"Final validation: extracted '{grade}' from text")
+                    prediction = grade
+                    break
+        
+        # Additional validation: check for common misclassification patterns
+        # If prediction is "Correct" but text contains indicators of incompleteness
+        if prediction == "Correct":
+            incomplete_indicators = [
+                "not proven", "not complete", "incomplete", "missing", "gaps",
+                "not fully", "partially", "not established", "lacks proof"
+            ]
+            for indicator in incomplete_indicators:
+                if indicator in last_text.lower():
+                    self.log_fn(f"Correct overridden to Partial due to indicator: {indicator}")
+                    prediction = "Partial"
+                    break
+        
+        # If prediction is "Almost" but text contains indicators of significant gaps
+        if prediction == "Almost":
+            significant_gap_indicators = [
+                "not proven", "not complete", "incomplete proof", "missing key",
+                "significant gaps", "main result not", "not established"
+            ]
+            for indicator in significant_gap_indicators:
+                if indicator in last_text.lower():
+                    self.log_fn(f"Almost overridden to Partial due to indicator: {indicator}")
+                    prediction = "Partial"
+                    break
+
+        return str(prediction), msg_history

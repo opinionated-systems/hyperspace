@@ -1,0 +1,7 @@
+{
+  "model": "gpt-oss-120b",
+  "agent_name": "gpt-oss-120b",
+  "seed": 42,
+  "iterations": 40,
+  "python_version": "3.11.15"
+}

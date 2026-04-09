@@ -1,0 +1,524 @@
+"""
+LLM client wrapper using markspace.llm.LLMClient.
+
+Replaces litellm from the paper's implementation. Provides the same
+interface as the paper's get_response_from_llm.
+
+All LLM calls are logged to a JSONL audit file (set via set_audit_log).
+Each entry includes: timestamp, model, messages, response, thinking trace, usage.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import random
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Any, Callable
+
+from dotenv import load_dotenv
+
+from markspace.llm import LLMClient, LLMConfig
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+MAX_TOKENS = 16384
+
+# Model aliases
+META_MODEL = "accounts/fireworks/routers/kimi-k2p5-turbo"
+EVAL_MODEL = "gpt-oss-120b"
+
+# Shared clients (created on first use)
+_clients: dict[str, LLMClient] = {}
+
+# Audit logging
+_audit_log_path: str | None = None
+_audit_lock = threading.Lock()
+_call_counter = 0
+
+# Retry configuration
+MAX_RETRIES = 5
+BASE_RETRY_DELAY = 2  # seconds
+MAX_RETRY_DELAY = 60  # seconds
+
+# Circuit breaker configuration
+CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5
+CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 60  # seconds
+CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS = 3
+
+
+class CircuitBreaker:
+    """Circuit breaker pattern for LLM calls.
+    
+    Prevents cascading failures by temporarily disabling calls
+    after a threshold of failures is reached.
+    """
+    
+    def __init__(
+        self,
+        failure_threshold: int = CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+        recovery_timeout: int = CIRCUIT_BREAKER_RECOVERY_TIMEOUT,
+        half_open_max_calls: int = CIRCUIT_BREAKER_HALF_OPEN_MAX_CALLS,
+    ):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max_calls = half_open_max_calls
+        
+        self._failures = 0
+        self._last_failure_time: float | None = None
+        self._state = "closed"  # closed, open, half-open
+        self._half_open_calls = 0
+        self._lock = threading.Lock()
+    
+    def can_execute(self) -> bool:
+        """Check if execution is allowed."""
+        with self._lock:
+            if self._state == "closed":
+                return True
+            
+            if self._state == "open":
+                # Check if recovery timeout has passed
+                if self._last_failure_time and \
+                   (time.time() - self._last_failure_time) >= self.recovery_timeout:
+                    self._state = "half-open"
+                    self._half_open_calls = 0
+                    logger.info("Circuit breaker entering half-open state")
+                    return True
+                return False
+            
+            if self._state == "half-open":
+                if self._half_open_calls < self.half_open_max_calls:
+                    self._half_open_calls += 1
+                    return True
+                return False
+            
+            return True
+    
+    def record_success(self) -> None:
+        """Record a successful execution."""
+        with self._lock:
+            if self._state == "half-open":
+                self._state = "closed"
+                self._failures = 0
+                self._half_open_calls = 0
+                logger.info("Circuit breaker closed after successful test calls")
+            else:
+                self._failures = max(0, self._failures - 1)
+    
+    def record_failure(self) -> None:
+        """Record a failed execution."""
+        with self._lock:
+            self._failures += 1
+            self._last_failure_time = time.time()
+            
+            if self._state == "half-open":
+                self._state = "open"
+                logger.warning(f"Circuit breaker opened after failure in half-open state")
+            elif self._failures >= self.failure_threshold:
+                self._state = "open"
+                logger.warning(f"Circuit breaker opened after {self._failures} failures")
+    
+    def get_state(self) -> str:
+        """Get current circuit breaker state."""
+        with self._lock:
+            return self._state
+
+
+# Circuit breakers per model
+_circuit_breakers: dict[str, CircuitBreaker] = {}
+
+
+def set_audit_log(path: str | None) -> None:
+    """Set the JSONL audit log path. None disables logging.
+
+    Also propagates to repo-loaded copy of this module (agent.llm_client)
+    which is a separate module instance due to import rewriting.
+    """
+    global _audit_log_path, _call_counter
+    _audit_log_path = path
+    _call_counter = 0
+    if path:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except Exception as e:
+            logger.warning(f"Failed to create audit log directory: {e}")
+    # Propagate to repo copy if already loaded
+    import sys
+    repo = sys.modules.get("agent.llm_client")
+    if repo is not None and repo is not sys.modules.get(__name__):
+        repo._audit_log_path = path
+        repo._audit_lock = _audit_lock
+        repo._clients = _clients
+
+
+def _write_audit(entry: dict) -> None:
+    """Append a single JSON entry to the audit log (thread-safe)."""
+    if _audit_log_path is None:
+        return
+    try:
+        with _audit_lock:
+            with open(_audit_log_path, "a") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+    except Exception as e:
+        logger.warning(f"Failed to write audit log: {e}")
+
+
+def _get_client(model: str) -> LLMClient:
+    """Get or create a client for the given model."""
+    if model not in _clients:
+        try:
+            cfg = LLMConfig.from_env(model=model)
+            config = LLMConfig(
+                base_url=cfg.base_url,
+                api_key=cfg.api_key,
+                model=cfg.model,
+                temperature=0.0,
+                max_tokens=MAX_TOKENS,
+            )
+            client = LLMClient(config, max_retries=8, timeout=300)
+            client.__enter__()
+            _clients[model] = client
+            logger.info(f"Created LLM client for model: {model}")
+        except Exception as e:
+            logger.exception(f"Failed to create LLM client for {model}")
+            raise
+    return _clients[model]
+
+
+def cleanup_clients():
+    """Close all open clients."""
+    for model, client in list(_clients.items()):
+        try:
+            client.__exit__(None, None, None)
+            logger.info(f"Closed LLM client for model: {model}")
+        except Exception as e:
+            logger.warning(f"Error closing client for {model}: {e}")
+    _clients.clear()
+
+
+def _get_circuit_breaker(model: str) -> CircuitBreaker:
+    """Get or create circuit breaker for a model."""
+    if model not in _circuit_breakers:
+        _circuit_breakers[model] = CircuitBreaker()
+    return _circuit_breakers[model]
+
+
+def _categorize_error(error: Exception) -> tuple[str, bool]:
+    """Categorize an error and determine if it's retryable.
+    
+    Returns:
+        Tuple of (category, is_retryable)
+    """
+    error_str = str(error).lower()
+    error_type = type(error).__name__
+    
+    # Rate limiting errors - always retryable with longer delays
+    if any(kw in error_str for kw in ["rate limit", "too many requests", "429", "throttled"]):
+        return "rate_limit", True
+    
+    # Authentication errors - not retryable
+    if any(kw in error_str for kw in ["authentication", "unauthorized", "401", "403", "api key"]):
+        return "auth", False
+    
+    # Timeout errors - retryable
+    if any(kw in error_str for kw in ["timeout", "timed out", "connection timed out"]):
+        return "timeout", True
+    
+    # Connection errors - retryable
+    if any(kw in error_str for kw in ["connection", "network", "dns", "unreachable", "refused"]):
+        return "connection", True
+    
+    # Server errors (5xx) - retryable
+    if any(kw in error_str for kw in ["500", "502", "503", "504", "internal server error", "bad gateway", "service unavailable"]):
+        return "server", True
+    
+    # Content/policy errors - not retryable
+    if any(kw in error_str for kw in ["content filter", "safety", "policy", "blocked", "moderation"]):
+        return "content_policy", False
+    
+    # Context length errors - not retryable (need to reduce input)
+    if any(kw in error_str for kw in ["context length", "too long", "maximum context", "token limit"]):
+        return "context_length", False
+    
+    # Invalid request - not retryable
+    if any(kw in error_str for kw in ["invalid", "bad request", "400", "malformed"]):
+        return "invalid_request", False
+    
+    # Default: retryable for unknown errors
+    return "unknown", True
+
+
+def _retry_with_backoff(
+    operation: Callable[[], Any],
+    max_retries: int = MAX_RETRIES,
+    base_delay: int = BASE_RETRY_DELAY,
+    max_delay: int = MAX_RETRY_DELAY,
+    operation_name: str = "operation",
+    model: str | None = None,
+) -> Any:
+    """Execute operation with exponential backoff retry and circuit breaker.
+    
+    Enhanced with error categorization for smarter retry decisions.
+    
+    Args:
+        operation: Callable to execute
+        max_retries: Maximum number of retry attempts
+        base_delay: Initial delay between retries (seconds)
+        max_delay: Maximum delay between retries (seconds)
+        operation_name: Name of operation for logging
+        model: Model name for circuit breaker tracking
+    
+    Returns:
+        Result of operation
+    
+    Raises:
+        Exception: If all retries fail or circuit breaker is open
+    """
+    # Check circuit breaker if model is specified
+    if model:
+        cb = _get_circuit_breaker(model)
+        if not cb.can_execute():
+            raise RuntimeError(
+                f"Circuit breaker is open for model {model}. "
+                f"Too many failures detected. Please wait before retrying."
+            )
+    
+    last_exception = None
+    consecutive_rate_limits = 0
+    
+    for attempt in range(max_retries):
+        try:
+            result = operation()
+            # Record success for circuit breaker
+            if model:
+                cb.record_success()
+            return result
+        except Exception as e:
+            last_exception = e
+            
+            # Categorize the error
+            category, is_retryable = _categorize_error(e)
+            
+            # Record failure for circuit breaker (only for certain categories)
+            if model and category not in ["auth", "content_policy", "invalid_request"]:
+                cb.record_failure()
+            
+            # Don't retry non-retryable errors
+            if not is_retryable:
+                logger.error(
+                    f"{operation_name} failed with non-retryable error ({category}): {e}"
+                )
+                raise
+            
+            if attempt == max_retries - 1:
+                logger.error(f"{operation_name} failed after {max_retries} attempts: {e}")
+                raise
+            
+            # Calculate delay with category-specific adjustments
+            delay = min(max_delay, base_delay * (2 ** attempt))
+            
+            # Rate limit errors get longer delays
+            if category == "rate_limit":
+                consecutive_rate_limits += 1
+                delay = min(max_delay, delay * (1.5 ** consecutive_rate_limits))
+                logger.warning(f"Rate limit hit, increasing delay to {delay:.1f}s")
+            else:
+                consecutive_rate_limits = 0
+            
+            # Add jitter to prevent thundering herd
+            jitter = random.uniform(0, 1)
+            delay_with_jitter = delay + jitter
+            
+            logger.warning(
+                f"{operation_name} failed (attempt {attempt + 1}/{max_retries}, category: {category}): {e}. "
+                f"Retrying in {delay_with_jitter:.1f}s..."
+            )
+            time.sleep(delay_with_jitter)
+    
+    # Should not reach here, but just in case
+    raise last_exception if last_exception else RuntimeError(f"{operation_name} failed")
+
+
+def _make_llm_call(
+    client: LLMClient,
+    messages: list[dict],
+    temperature: float,
+    tools: list[dict] | None = None,
+    model: str | None = None,
+) -> dict:
+    """Make LLM call with retry logic and circuit breaker."""
+    def _call():
+        return client.chat(messages, tools=tools, temperature=temperature)
+    
+    return _retry_with_backoff(
+        _call,
+        operation_name="LLM call",
+        model=model,
+    )
+
+
+def _audit_log_call(
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    messages: list[dict],
+    response_text: str,
+    thinking: str,
+    usage: dict,
+    tool_calls: list[dict] | None = None,
+) -> None:
+    """Write audit log entry for LLM call."""
+    global _call_counter
+    _call_counter += 1
+    
+    entry = {
+        "call_id": _call_counter,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "messages": messages,
+        "response": response_text,
+        "thinking": thinking,
+        "usage": usage,
+    }
+    
+    if tool_calls:
+        entry["tool_calls"] = [
+            {"name": tc["function"]["name"], "arguments": tc["function"]["arguments"]}
+            for tc in tool_calls
+        ]
+    
+    _write_audit(entry)
+
+
+def get_response_from_llm(
+    msg: str,
+    model: str = META_MODEL,
+    temperature: float = 0.0,
+    max_tokens: int = MAX_TOKENS,
+    msg_history: list[dict] | None = None,
+) -> tuple[str, list[dict], dict]:
+    """Call LLM and return (response_text, updated_msg_history, info).
+
+    Matches the paper's get_response_from_llm interface exactly.
+    msg_history uses {"role": ..., "text": ...} format (paper's convention).
+    """
+    if msg_history is None:
+        msg_history = []
+
+    # Convert text→content for API call
+    messages = []
+    for m in msg_history:
+        content = m.get("text") or m.get("content", "")
+        messages.append({"role": m["role"], "content": content})
+    messages.append({"role": "user", "content": msg})
+
+    client = _get_client(model)
+
+    # Make LLM call with retry and circuit breaker
+    response = _make_llm_call(client, messages, temperature, model=model)
+
+    response_text = response["choices"][0]["message"].get("content") or ""
+    thinking = response["choices"][0]["message"].get("reasoning_content") or ""
+    usage = response.get("usage", {})
+
+    # Audit log
+    _audit_log_call(
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        messages=messages,
+        response_text=response_text,
+        thinking=thinking,
+        usage=usage,
+    )
+
+    # Build updated history in paper's text format
+    new_msg_history = list(msg_history)
+    new_msg_history.append({"role": "user", "text": msg})
+    new_msg_history.append({"role": "assistant", "text": response_text})
+
+    info = {
+        "thinking": thinking,
+        "usage": usage,
+    }
+
+    return response_text, new_msg_history, info
+
+
+def get_response_from_llm_with_tools(
+    model: str = META_MODEL,
+    temperature: float = 0.0,
+    max_tokens: int = MAX_TOKENS,
+    msg_history: list[dict] | None = None,
+    tools: list[dict] | None = None,
+    msg: str | None = None,
+    tool_call_id: str | None = None,
+    tool_name: str | None = None,
+    tool_output: str | None = None,
+) -> tuple[dict, list[dict], dict]:
+    """Call LLM with native tool calling support.
+
+    Either pass msg (user message) or tool_call_id+tool_name+tool_output (tool result).
+    Returns (response_message_dict, updated_msg_history, info).
+    msg_history uses raw OpenAI message format (dicts with role, content, tool_calls, etc).
+    """
+    if msg_history is None:
+        msg_history = []
+
+    messages = list(msg_history)
+
+    if msg is not None:
+        messages.append({"role": "user", "content": msg})
+    elif tool_call_id is not None:
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "content": tool_output or "",
+        })
+
+    client = _get_client(model)
+
+    # Make LLM call with retry and circuit breaker
+    response = _make_llm_call(client, messages, temperature, tools, model=model)
+
+    resp_msg = response["choices"][0]["message"]
+    response_text = resp_msg.get("content") or ""
+    thinking = resp_msg.get("reasoning_content") or ""
+    tool_calls = resp_msg.get("tool_calls") or []
+    usage = response.get("usage", {})
+
+    # Audit log
+    _audit_log_call(
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        messages=messages,
+        response_text=response_text,
+        thinking=thinking,
+        usage=usage,
+        tool_calls=tool_calls,
+    )
+
+    # Build updated history — keep raw OpenAI format for tool calling
+    new_msg_history = list(messages)
+    # Add assistant response (with tool_calls if present)
+    assistant_msg = {"role": "assistant"}
+    if response_text:
+        assistant_msg["content"] = response_text
+    if tool_calls:
+        assistant_msg["tool_calls"] = tool_calls
+    new_msg_history.append(assistant_msg)
+
+    info = {
+        "thinking": thinking,
+        "usage": usage,
+    }
+
+    return resp_msg, new_msg_history, info

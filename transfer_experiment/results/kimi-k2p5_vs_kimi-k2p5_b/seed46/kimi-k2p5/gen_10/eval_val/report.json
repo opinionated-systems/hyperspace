@@ -1,0 +1,32 @@
+{
+  "overall_accuracy": 0.24,
+  "normalized_mean_absolute_error": 0.40714285714285714,
+  "total_correct": 24,
+  "total": 100,
+  "accuracy_by_label": {
+    "almost": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "correct": 0,
+      "total": 5
+    },
+    "correct": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "correct": 0,
+      "total": 35
+    },
+    "incorrect": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "correct": 0,
+      "total": 35
+    },
+    "partial": {
+      "precision": 0.25263157894736843,
+      "recall": 0.96,
+      "correct": 24,
+      "total": 25
+    }
+  }
+}

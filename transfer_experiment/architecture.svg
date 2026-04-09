@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 480" font-family="system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 Z" fill="#555"/>
+    </marker>
+  </defs>
+
+  <!-- Claude agent -->
+  <rect x="60" y="20" width="180" height="130" rx="10" fill="#fff8f0" stroke="#e65100" stroke-width="1.5"/>
+  <text x="150" y="44" text-anchor="middle" font-size="13" font-weight="600" fill="#e65100">Claude Sonnet 4.6</text>
+  <line x1="75" y1="52" x2="225" y2="52" stroke="#e6510044"/>
+  <text x="80" y="70" font-size="8" fill="#999" letter-spacing="0.5">LLM</text>
+  <text x="80" y="87" font-size="9.5" fill="#555">proposes code edits</text>
+  <text x="80" y="103" font-size="9.5" fill="#555">invokes bash via Guard</text>
+  <text x="80" y="119" font-size="9.5" fill="#555">reads marks</text>
+  <text x="80" y="140" font-size="8" fill="#888">all actions go through Guard</text>
+
+  <!-- kimi agent -->
+  <rect x="480" y="20" width="180" height="130" rx="10" fill="#f0f4ff" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="570" y="44" text-anchor="middle" font-size="13" font-weight="600" fill="#1565c0">Kimi K2.5 Turbo</text>
+  <line x1="495" y1="52" x2="645" y2="52" stroke="#1565c044"/>
+  <text x="500" y="70" font-size="8" fill="#999" letter-spacing="0.5">LLM</text>
+  <text x="500" y="87" font-size="9.5" fill="#555">proposes code edits</text>
+  <text x="500" y="103" font-size="9.5" fill="#555">invokes bash via Guard</text>
+  <text x="500" y="119" font-size="9.5" fill="#555">reads marks</text>
+  <text x="500" y="140" font-size="8" fill="#888">all actions go through Guard</text>
+
+  <!-- Guard -->
+  <rect x="200" y="195" width="320" height="75" rx="10" fill="#fff0f0" stroke="#c62828" stroke-width="2"/>
+  <text x="360" y="220" text-anchor="middle" font-size="14" font-weight="700" fill="#b71c1c">markspace Guard</text>
+  <text x="360" y="238" text-anchor="middle" font-size="9.5" fill="#555">Identity · Scope · Immutability</text>
+  <text x="360" y="255" text-anchor="middle" font-size="9" fill="#888">code edits, bash, marks — all through Guard</text>
+
+  <!-- Arrows: agents → Guard -->
+  <path d="M 150 150 C 170 180, 230 180, 260 195" fill="none" stroke="#555" stroke-width="1.5" marker-end="url(#arr)"/>
+  <path d="M 570 150 C 550 180, 490 180, 460 195" fill="none" stroke="#555" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Mark Space -->
+  <rect x="200" y="315" width="320" height="100" rx="10" fill="#f5f0ff" stroke="#7b1fa2" stroke-width="1.5"/>
+  <text x="360" y="338" text-anchor="middle" font-size="12" font-weight="600" fill="#6a1b9a">Mark Space</text>
+
+  <!-- codebase/claude — orange border, claude's color -->
+  <rect x="215" y="348" width="90" height="50" rx="5" fill="#fff8f0" stroke="#e65100" stroke-width="1.2"/>
+  <text x="260" y="366" text-anchor="middle" font-size="8.5" font-weight="600" fill="#e65100">codebase/</text>
+  <text x="260" y="378" text-anchor="middle" font-size="8.5" font-weight="600" fill="#e65100">claude</text>
+  <text x="260" y="392" text-anchor="middle" font-size="7.5" fill="#888">read+write: claude</text>
+
+  <!-- codebase/kimi — blue border, kimi's color -->
+  <rect x="315" y="348" width="90" height="50" rx="5" fill="#f0f4ff" stroke="#1565c0" stroke-width="1.2"/>
+  <text x="360" y="366" text-anchor="middle" font-size="8.5" font-weight="600" fill="#1565c0">codebase/</text>
+  <text x="360" y="378" text-anchor="middle" font-size="8.5" font-weight="600" fill="#1565c0">kimi</text>
+  <text x="360" y="392" text-anchor="middle" font-size="7.5" fill="#888">read+write: kimi</text>
+
+  <!-- strategies — neutral purple, shared -->
+  <rect x="415" y="348" width="90" height="50" rx="5" fill="#f5f0ff" stroke="#9c27b0" stroke-width="1.2"/>
+  <text x="460" y="370" text-anchor="middle" font-size="8.5" font-weight="600" fill="#6a1b9a">strategies</text>
+  <text x="460" y="386" text-anchor="middle" font-size="7.5" fill="#888">read: both, write: harness</text>
+
+  <!-- Arrow: Guard → Space -->
+  <path d="M 360 270 C 360 290, 360 295, 360 313" fill="none" stroke="#555" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Blocked (left) -->
+  <text x="30" y="210" font-size="8" fill="#999" letter-spacing="0.5">BLOCKED</text>
+  <text x="30" y="228" font-size="9" fill="#c62828">✗ bypass Guard</text>
+  <text x="30" y="242" font-size="9" fill="#c62828">✗ edit another agent's scope</text>
+  <text x="30" y="256" font-size="9" fill="#c62828">✗ overwrite previous versions</text>
+  <text x="30" y="270" font-size="9" fill="#c62828">✗ forge identity</text>
+
+  <!-- Permitted (right) -->
+  <text x="545" y="210" font-size="8" fill="#999" letter-spacing="0.5">PERMITTED</text>
+  <text x="545" y="228" font-size="9" fill="#2e7d32">✓ edit own codebase scope</text>
+  <text x="545" y="242" font-size="9" fill="#2e7d32">✓ read other agent's code</text>
+  <text x="545" y="256" font-size="9" fill="#2e7d32">✓ read peer strategies</text>
+  <text x="545" y="270" font-size="9" fill="#2e7d32">✓ invoke bash via Guard</text>
+
+  <!-- Immutability note -->
+  <text x="360" y="440" text-anchor="middle" font-size="8.5" fill="#888">every code version persists as an immutable mark — complete audit trail</text>
+
+</svg>

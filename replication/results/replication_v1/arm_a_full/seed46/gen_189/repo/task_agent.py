@@ -1,0 +1,688 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import time
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+# Maximum retries for LLM calls when JSON extraction fails
+MAX_LLM_RETRIES = 2
+# Delay between retries (seconds)
+RETRY_DELAY = 0.5
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    Also attempts to extract JSON from markdown code blocks as fallback.
+    Includes enhanced error recovery for malformed JSON.
+    """
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            # Try to fix common JSON issues
+            fixed = _attempt_json_repair(inner)
+            if fixed:
+                results.append(fixed)
+            continue
+    
+    # Fallback: try to extract JSON from markdown code blocks
+    if not results:
+        search_from = 0
+        while True:
+            start = text.find("```json", search_from)
+            if start == -1:
+                # Try without language specifier
+                start = text.find("```", search_from)
+                if start == -1:
+                    break
+                end_marker = "```"
+                start += 3
+            else:
+                end_marker = "```"
+                start += 7
+            
+            end = text.find(end_marker, start)
+            if end == -1:
+                break
+            inner = text[start:end].strip()
+            search_from = end + 3
+            try:
+                results.append(json.loads(inner))
+            except json.JSONDecodeError:
+                # Try to fix common JSON issues
+                fixed = _attempt_json_repair(inner)
+                if fixed:
+                    results.append(fixed)
+                continue
+    
+    # Fallback: try to find JSON objects directly in the text
+    if not results:
+        # Look for JSON-like structures with curly braces
+        brace_start = text.find("{")
+        while brace_start != -1:
+            # Try to find matching closing brace
+            brace_count = 0
+            for i, char in enumerate(text[brace_start:]):
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        json_str = text[brace_start:brace_start + i + 1]
+                        try:
+                            parsed = json.loads(json_str)
+                            # Only accept if it has expected fields
+                            if any(key in parsed for key in ["response", "grade", "score", "analysis"]):
+                                results.append(parsed)
+                        except json.JSONDecodeError:
+                            # Try to fix common JSON issues
+                            fixed = _attempt_json_repair(json_str)
+                            if fixed and any(key in fixed for key in ["response", "grade", "score", "analysis"]):
+                                results.append(fixed)
+                            pass
+                        break
+            brace_start = text.find("{", brace_start + 1)
+    
+    return results or None
+
+
+def _extract_grade_from_analysis(analysis_text: str) -> str | None:
+    """Extract grade from analysis text when JSON extraction fails.
+    
+    This is a fallback mechanism that searches for grade indicators
+    in the raw text when structured JSON extraction doesn't work.
+    
+    Args:
+        analysis_text: The raw text from the LLM response
+        
+    Returns:
+        A normalized grade string or None if no grade found
+    """
+    if not analysis_text:
+        return None
+    
+    text_lower = analysis_text.lower()
+    
+    # Look for explicit grade statements with various patterns
+    grade_patterns = [
+        # "grade is X", "grade: X", "final grade: X"
+        r'(?:final\s+)?grade\s*(?:is|:|=)\s*([0-7]|correct|partial|incorrect)',
+        # "score is X", "score: X", "final score: X"
+        r'(?:final\s+)?score\s*(?:is|:|=)\s*([0-7]|correct|partial|incorrect)',
+        # "assigned grade: X"
+        r'assigned\s+(?:grade|score)\s*(?:is|:|=)\s*([0-7]|correct|partial|incorrect)',
+        # "the answer is X" (where X is a grade)
+        r'the\s+(?:answer|solution)\s+is\s+(correct|partial|incorrect)',
+        # "this is X" (where X is a grade)
+        r'this\s+is\s+(correct|partial|incorrect)',
+    ]
+    
+    for pattern in grade_patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            grade = match.group(1).strip()
+            normalized = _normalize_grade_response(grade)
+            if normalized and normalized != "None":
+                return normalized
+    
+    # Look for numeric scores in context
+    # Pattern: "X out of 7" or "X/7" or "score of X"
+    numeric_patterns = [
+        r'(\d+)\s*out\s+of\s*7',
+        r'(\d+)\s*/\s*7',
+        r'score\s+of\s+(\d+)',
+        r'(?:worth|deserves|earns?)\s+(\d+)\s*(?:points?)?',
+    ]
+    
+    for pattern in numeric_patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            try:
+                score = int(match.group(1))
+                if 0 <= score <= 7:
+                    if score == 7:
+                        return "Correct"
+                    elif score >= 4:
+                        return "Partial"
+                    elif score >= 1:
+                        return "Partial"
+                    else:
+                        return "Incorrect"
+            except ValueError:
+                continue
+    
+    # Check for grade keywords in conclusion/summary sections
+    conclusion_indicators = [
+        'in conclusion', 'to summarize', 'overall', 'final assessment',
+        'in summary', 'therefore', 'thus', 'conclusion:'
+    ]
+    
+    for indicator in conclusion_indicators:
+        if indicator in text_lower:
+            # Look for grade keywords near the conclusion
+            idx = text_lower.find(indicator)
+            conclusion_text = text_lower[idx:idx + 200]  # Check next 200 chars
+            
+            if any(word in conclusion_text for word in ['incorrect', 'wrong', 'false', 'fail']):
+                return "Incorrect"
+            elif any(word in conclusion_text for word in ['partial', 'partially', 'incomplete']):
+                return "Partial"
+            elif any(word in conclusion_text for word in ['correct', 'right', 'true', 'full', 'complete']):
+                return "Correct"
+    
+    return None
+
+
+def _attempt_json_repair(json_str: str) -> dict | None:
+    """Attempt to repair common JSON formatting issues.
+    
+    Handles:
+    - Trailing commas in objects/arrays
+    - Single quotes instead of double quotes
+    - Unescaped newlines in strings
+    - Missing quotes around keys
+    
+    Returns the repaired dict if successful, None otherwise.
+    """
+    if not json_str or not json_str.strip():
+        return None
+    
+    repaired = json_str.strip()
+    
+    # Try original first
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+    
+    # Fix 1: Remove trailing commas before } or ]
+    repaired = re.sub(r',\s*}', '}', repaired)
+    repaired = re.sub(r',\s*]', ']', repaired)
+    
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+    
+    # Fix 2: Replace single quotes with double quotes (carefully)
+    # Only replace single quotes that are not inside strings
+    # This is a heuristic approach
+    try:
+        # Try replacing outer single quotes
+        if repaired.startswith("'") and repaired.endswith("'"):
+            repaired = repaired[1:-1]
+        # Replace single quotes around keys and values
+        repaired = re.sub(r"'([^']*?)'\s*:", r'"\1":', repaired)
+        repaired = re.sub(r":\s*'([^']*?)'", r': "\1"', repaired)
+        return json.loads(repaired)
+    except (json.JSONDecodeError, re.error):
+        pass
+    
+    # Fix 3: Escape unescaped newlines in strings
+    try:
+        # Find strings and escape newlines within them
+        def escape_newlines_in_strings(match):
+            content = match.group(1)
+            # Escape unescaped newlines
+            content = content.replace('\n', '\\n')
+            content = content.replace('\r', '\\r')
+            return '"' + content + '"'
+        
+        repaired = re.sub(r'"([^"]*)"', escape_newlines_in_strings, repaired)
+        return json.loads(repaired)
+    except (json.JSONDecodeError, re.error):
+        pass
+    
+    return None
+
+
+def _normalize_grade_response(response: str) -> str:
+    """Normalize a grade response to a standard format.
+    
+    Handles various grade formats including:
+    - Numeric scores (0-7)
+    - Text grades (Correct, Partial, Incorrect)
+    - Mixed formats (e.g., "Partial/3", "Correct/7")
+    - Case-insensitive matching
+    - Whitespace trimming
+    - Common variations and synonyms
+    
+    Returns a standardized grade string.
+    """
+    if not response:
+        return "None"
+    
+    # Handle non-string types (int, float, etc.)
+    if not isinstance(response, str):
+        try:
+            response = str(int(response))
+        except (ValueError, TypeError):
+            return "None"
+    
+    # Clean up the response
+    cleaned = response.strip()
+    cleaned_lower = cleaned.lower()
+    
+    # Remove common prefixes/suffixes that might appear
+    cleaned_lower = re.sub(r'^(grade|score|result|evaluation|final grade|final score)[:\s=]+', '', cleaned_lower)
+    cleaned_lower = re.sub(r'[:\s=]+(points?|pts?|out of 7)?$', '', cleaned_lower)
+    
+    # Handle mixed formats like "Partial/3" or "Correct/7"
+    if "/" in cleaned:
+        parts = cleaned.split("/")
+        grade_part = parts[0].strip().lower()
+        
+        # Check if it's a valid grade prefix
+        if grade_part in ("correct", "partial", "incorrect"):
+            return parts[0].strip()
+        
+        # Check if second part is numeric and first part might be a score
+        try:
+            score = int(parts[1].strip())
+            if 0 <= score <= 7:
+                if score == 7:
+                    return "Correct"
+                elif score >= 4:
+                    return "Partial"
+                elif score >= 1:
+                    return "Partial"
+                else:
+                    return "Incorrect"
+        except ValueError:
+            pass
+    
+    # Direct text grade matching (case-insensitive)
+    if cleaned_lower == "correct" or cleaned_lower == "correct/7":
+        return "Correct"
+    if cleaned_lower == "incorrect" or cleaned_lower == "incorrect/0":
+        return "Incorrect"
+    if cleaned_lower.startswith("partial"):
+        return "Partial"
+    
+    # Try to parse as a numeric score
+    try:
+        score = int(cleaned)
+        if score == 7:
+            return "Correct"
+        elif 4 <= score <= 6:
+            return "Partial"
+        elif 1 <= score <= 3:
+            return "Partial"
+        elif score == 0:
+            return "Incorrect"
+    except ValueError:
+        pass
+    
+    # Check for grade embedded in text (e.g., "The grade is: Correct")
+    for grade in ["Correct", "Partial", "Incorrect"]:
+        if grade.lower() in cleaned_lower:
+            return grade
+    
+    # Return original if no normalization applied
+    return cleaned
+
+
+def _log_extraction_diagnostics(log_fn, last_assistant_msg: str, extracted: list | None, prediction: str) -> None:
+    """Log detailed diagnostics about grade extraction for debugging.
+    
+    This helps identify why grade extraction might be failing and
+    provides context for improving the extraction logic.
+    """
+    log_fn(f"=== Grade Extraction Diagnostics ===")
+    log_fn(f"Message length: {len(last_assistant_msg)} chars")
+    log_fn(f"JSON blocks found: {len(extracted) if extracted else 0}")
+    
+    # Check for common formatting issues
+    if "<json>" in last_assistant_msg and "</json>" not in last_assistant_msg:
+        log_fn("WARNING: Opening <json> tag found but no closing </json> tag")
+    if "</json>" in last_assistant_msg and "<json>" not in last_assistant_msg:
+        log_fn("WARNING: Closing </json> tag found but no opening <json> tag")
+    
+    # Check for markdown code blocks
+    if "```json" in last_assistant_msg:
+        log_fn("Found markdown JSON code block (```json)")
+    elif "```" in last_assistant_msg:
+        log_fn("Found markdown code block without json specifier")
+    
+    # Log final prediction
+    log_fn(f"Final prediction after normalization: {prediction}")
+    log_fn(f"=== End Diagnostics ===")
+
+
+def _get_last_assistant_message(msg_history: list[dict]) -> str | None:
+    """Extract the last assistant message from message history.
+    
+    Handles different message formats from various LLM providers.
+    """
+    for msg in reversed(msg_history):
+        role = msg.get("role", "")
+        if role == "assistant" or "text" in msg:
+            return msg.get("text", msg.get("content", ""))
+    return None
+
+
+def _extract_prediction_from_message(
+    last_assistant_msg: str, 
+    log_fn,
+    extracted_cache: list | None = None
+) -> tuple[str, list | None]:
+    """Extract prediction from assistant message with comprehensive fallback strategies.
+    
+    Returns:
+        tuple of (prediction, extracted_json_list)
+    """
+    prediction = "None"
+    extracted = extracted_cache if extracted_cache is not None else _extract_jsons(last_assistant_msg)
+    
+    if extracted:
+        # Try to get response field first, fallback to other common fields
+        last_extract = extracted[-1]
+        
+        # Priority order for grade extraction
+        grade_fields = ["response", "grade", "score", "result", "final_grade", "evaluation"]
+        for field in grade_fields:
+            if field in last_extract:
+                prediction = last_extract[field]
+                break
+        
+        # Normalize the grade for consistency
+        prediction = _normalize_grade(prediction)
+    else:
+        # Try to extract grade directly from text as last resort
+        text_lower = last_assistant_msg.lower()
+        if "grade:" in text_lower or "score:" in text_lower:
+            match = re.search(r'(?:grade|score):\s*(.+?)(?:\n|$)', text_lower, re.IGNORECASE)
+            if match:
+                prediction = _normalize_grade(match.group(1).strip())
+                log_fn(f"Extracted grade from text: {prediction}")
+        
+        # Use the enhanced grade extraction from analysis as additional fallback
+        if prediction == "None":
+            fallback_grade = _extract_grade_from_analysis(last_assistant_msg)
+            if fallback_grade:
+                prediction = fallback_grade
+                log_fn(f"Extracted grade using analysis fallback: {prediction}")
+    
+    return prediction, extracted
+
+
+def _normalize_grade(grade: str) -> str:
+    """Normalize grade to standard format.
+    
+    Converts various grade formats to a consistent representation.
+    Handles both string grades (Correct/Partial/Incorrect) and numeric scores (0-7).
+    Includes enhanced handling for edge cases and ambiguous responses.
+    
+    This function now delegates to _normalize_grade_response for improved
+    handling of mixed formats and edge cases.
+    """
+    if not grade:
+        return "None"
+    
+    # Handle non-string types (int, float, etc.)
+    if not isinstance(grade, str):
+        try:
+            grade = str(int(grade))
+        except (ValueError, TypeError):
+            return "None"
+    
+    # First try the new comprehensive normalizer
+    normalized = _normalize_grade_response(grade)
+    if normalized != grade:  # If normalization changed something
+        return normalized
+    
+    grade = grade.strip()
+    grade_lower = grade.lower()
+    
+    # Map common variations to standard grades (using lowercase keys)
+    grade_map = {
+        "correct": "Correct",
+        "right": "Correct",
+        "true": "Correct",
+        "yes": "Correct",
+        "full": "Correct",
+        "full credit": "Correct",
+        "complete": "Correct",
+        "solved": "Correct",
+        "valid": "Correct",
+        "acceptable": "Correct",
+        "partial": "Partial",
+        "partially correct": "Partial",
+        "partial credit": "Partial",
+        "partially": "Partial",
+        "some credit": "Partial",
+        "incomplete": "Partial",
+        "mostly correct": "Partial",
+        "minor errors": "Partial",
+        "incorrect": "Incorrect",
+        "wrong": "Incorrect",
+        "false": "Incorrect",
+        "no": "Incorrect",
+        "none": "Incorrect",
+        "zero": "Incorrect",
+        "invalid": "Incorrect",
+        "unacceptable": "Incorrect",
+        "0": "0",
+        "1": "1",
+        "2": "2",
+        "3": "3",
+        "4": "4",
+        "5": "5",
+        "6": "6",
+        "7": "7",
+    }
+    
+    # Check for exact match first (case-insensitive)
+    if grade_lower in grade_map:
+        return grade_map[grade_lower]
+    
+    # Try to extract numeric score from patterns like "Score: 5", "Grade: 3", "5/7", "(6)"
+    # Pattern for standalone digit 0-7 (word boundary to avoid matching parts of larger numbers)
+    numeric_match = re.search(r'(?:^|\s|\()[0-7](?:$|\s|\))', grade)
+    if numeric_match:
+        # Extract just the digit
+        digit_match = re.search(r'[0-7]', numeric_match.group(0))
+        if digit_match:
+            return digit_match.group(0)
+    
+    # Pattern for "X points" or "X out of 7"
+    points_match = re.search(r'(\d+)\s*(?:points?|pts?|/\s*7|out\s+of\s+7)', grade_lower)
+    if points_match:
+        score = int(points_match.group(1))
+        if 0 <= score <= 7:
+            return str(score)
+    
+    # Check for grade in parentheses or brackets
+    bracket_match = re.search(r'[\(\[]([0-7]|correct|partial|incorrect)[\)\]]', grade_lower)
+    if bracket_match:
+        inner = bracket_match.group(1)
+        if inner in grade_map:
+            return grade_map[inner]
+        if inner.isdigit() and 0 <= int(inner) <= 7:
+            return inner
+    
+    # Check if grade contains keywords (order matters - check partial first)
+    if "partial" in grade_lower or "partially" in grade_lower:
+        return "Partial"
+    if any(word in grade_lower for word in ["incomplete", "unfinished", "missing", "minor error", "mostly"]):
+        return "Partial"
+    if any(word in grade_lower for word in ["correct", "right", "true", "full", "complete", "solved", "valid", "acceptable"]):
+        return "Correct"
+    if any(word in grade_lower for word in ["incorrect", "wrong", "false", "none", "zero", "error", "invalid", "unacceptable", "fail"]):
+        return "Incorrect"
+    
+    # Default: return the original grade (don't capitalize to preserve numeric values)
+    return grade
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems with chain-of-thought reasoning."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem with structured reasoning.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract fields for structured prompting
+        domain = inputs.get("domain", "")
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+
+        instruction = f"""You are an expert mathematical grader for International Mathematical Olympiad (IMO) problems.
+
+Your task is to evaluate a student's answer by comparing it against the official solution and grading guidelines.
+
+## Problem Domain
+{domain}
+
+## Problem Statement
+{problem}
+
+## Official Solution
+{solution}
+
+## Grading Guidelines
+{grading_guidelines}
+
+## Student's Answer
+{student_answer}
+
+## Instructions
+Follow this structured evaluation process:
+
+1. **Understanding Check**: Briefly summarize what the problem is asking and what the correct approach should be.
+
+2. **Step-by-Step Analysis**: Go through the student's answer carefully:
+   - Identify each key step or claim they make
+   - Check if each step is mathematically valid
+   - Note any errors, gaps, or incorrect assumptions
+   - Compare their approach to the official solution
+   - Check if they used the correct mathematical notation and terminology
+
+3. **Partial Credit Assessment**: Based on the grading guidelines, determine:
+   - Which parts of the solution they completed correctly
+   - What partial credit they deserve for incomplete or partially correct work
+   - Whether they demonstrated understanding of key concepts
+   - Whether they made significant progress toward the solution
+
+4. **Final Grade Decision**: Assign a grade that reflects:
+   - Full correctness (Correct/7) if completely solved with valid reasoning
+   - Partial credit (Partial/1-6) for incomplete or partially correct solutions
+   - Incorrect (Incorrect/0) for fundamentally wrong or empty answers
+
+## Grading Rubric Reference
+- 7 points: Complete, correct solution with clear reasoning
+- 5-6 points: Minor gaps or unclear reasoning, but essentially correct approach
+- 3-4 points: Significant progress, correct approach but incomplete or with errors
+- 1-2 points: Some relevant work or correct initial steps
+- 0 points: No meaningful progress or completely wrong approach
+
+Respond in JSON format with the following schema:
+<json>
+{{
+    "understanding": "Brief summary of the problem and correct approach",
+    "analysis": "Detailed step-by-step analysis of the student's answer, including what they got right and wrong",
+    "partial_credit_reasoning": "Explanation of partial credit based on grading guidelines and rubric",
+    "response": "Your final grade/score (use: 'Correct', 'Partial', 'Incorrect', or numeric 0-7)"
+}}
+</json>"""
+
+        # Make initial LLM call with retry logic for failed JSON extraction
+        prediction = "None"
+        msg_history = []
+        
+        for attempt in range(MAX_LLM_RETRIES + 1):
+            try:
+                response, msg_history, info = get_response_from_llm(
+                    msg=instruction,
+                    model=self.model,
+                    msg_history=msg_history if msg_history else [],
+                )
+                
+                # Get the last assistant message
+                last_assistant_msg = _get_last_assistant_message(msg_history)
+                
+                if not last_assistant_msg:
+                    self.log_fn(f"Warning: No assistant message found in history (attempt {attempt + 1})")
+                    if attempt < MAX_LLM_RETRIES:
+                        time.sleep(RETRY_DELAY)
+                        continue
+                    return str(prediction), msg_history
+                
+                # Extract prediction from message
+                prediction, extracted = _extract_prediction_from_message(
+                    last_assistant_msg, self.log_fn
+                )
+                
+                # Log detailed analysis for debugging if extraction succeeded
+                if extracted:
+                    last_extract = extracted[-1]
+                    if "analysis" in last_extract:
+                        self.log_fn(f"Analysis: {last_extract['analysis'][:200]}...")
+                    if "partial_credit_reasoning" in last_extract:
+                        self.log_fn(f"Partial Credit: {last_extract['partial_credit_reasoning'][:200]}...")
+                    if "understanding" in last_extract:
+                        self.log_fn(f"Understanding: {last_extract['understanding'][:200]}...")
+                    
+                    self.log_fn(f"Extracted grade: {prediction}")
+                    _log_extraction_diagnostics(self.log_fn, last_assistant_msg, extracted, prediction)
+                    
+                    # Success! Break out of retry loop
+                    break
+                else:
+                    self.log_fn(f"Warning: No JSON blocks found in response (attempt {attempt + 1})")
+                    _log_extraction_diagnostics(self.log_fn, last_assistant_msg, extracted, prediction)
+                    
+                    # If we have retries left, add a reminder to the conversation
+                    if attempt < MAX_LLM_RETRIES:
+                        reminder = "Please respond with a valid JSON object wrapped in <json>...</json> tags containing your grade evaluation."
+                        msg_history.append({"role": "user", "content": reminder})
+                        time.sleep(RETRY_DELAY)
+                    
+            except Exception as e:
+                self.log_fn(f"Error in attempt {attempt + 1}: {e}")
+                import traceback
+                self.log_fn(f"Traceback: {traceback.format_exc()}")
+                if attempt < MAX_LLM_RETRIES:
+                    time.sleep(RETRY_DELAY)
+
+        return str(prediction), msg_history

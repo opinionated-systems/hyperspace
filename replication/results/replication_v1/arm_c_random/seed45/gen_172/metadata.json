@@ -1,0 +1,6 @@
+{
+  "parent": 169,
+  "forked_from": 169,
+  "valid": false,
+  "error": "module 'agent.tools.search_tool' has no attribute 'tool_info'"
+}

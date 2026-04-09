@@ -1,0 +1,1516 @@
+{
+  "counters": [
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      0,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      0,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "strategies",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "strategies",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      2,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "strategies",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "strategies",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      4,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      4,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      4,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      4,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "strategies",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.read",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "b9ae60c4-f6c1-4f4d-9513-68125ad571aa",
+        "scope": "codebase/kimi-k2p5",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ],
+    [
+      "markspace.marks.written",
+      1,
+      {
+        "agent_id": "90e8f358-0feb-4c80-82a4-c67f465a2bca",
+        "scope": "codebase/kimi-k2p5_b",
+        "mark_type": "observation",
+        "verdict": "accepted"
+      }
+    ]
+  ],
+  "gauges": [
+    [
+      "markspace.space.active_marks",
+      0,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      0,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      2,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      3,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      4,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      4,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      4,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      4,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ],
+    [
+      "markspace.space.active_marks",
+      5,
+      {
+        "scope": "strategies"
+      }
+    ]
+  ]
+}

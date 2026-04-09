@@ -1,0 +1,603 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import re
+from functools import lru_cache
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+# Simple in-memory cache for grading results to avoid redundant API calls
+_response_cache: dict[str, tuple[str, str]] = {}
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    Also handles nested JSON objects and common formatting issues.
+    """
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        
+        # Try to parse the JSON
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            # Try common fixes: remove trailing commas, fix quotes
+            fixed = _fix_json_string(inner)
+            try:
+                results.append(json.loads(fixed))
+            except json.JSONDecodeError:
+                # Try extracting just the outermost JSON object
+                try:
+                    obj = _extract_outermost_json(inner)
+                    if obj:
+                        results.append(obj)
+                except Exception:
+                    # Last resort: try to extract key-value pairs manually
+                    try:
+                        obj = _extract_key_value_pairs(inner)
+                        if obj and ("response" in obj or "reasoning" in obj):
+                            results.append(obj)
+                    except Exception:
+                        continue
+    return results or None
+
+
+def _extract_key_value_pairs(text: str) -> dict | None:
+    """Extract key-value pairs from malformed JSON as a last resort."""
+    result = {}
+    
+    # Look for "response" field with various quote styles
+    response_patterns = [
+        r'"response"\s*:\s*"([^"]*)"',  # Standard double quotes
+        r"'response'\s*:\s*'([^']*)'",   # Single quotes
+        r'"response"\s*:\s*([A-Za-z]+)',  # Unquoted value
+        r'response\s*:\s*"([^"]*)"',     # No quotes on key
+        r'response\s*:\s*([A-Za-z]+)',    # No quotes at all
+    ]
+    
+    for pattern in response_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            result["response"] = match.group(1).strip()
+            break
+    
+    # Look for "reasoning" field
+    reasoning_patterns = [
+        r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"',  # Standard with escapes
+        r'"reasoning"\s*:\s*"([^"]*)"',  # Simple double quotes
+        r"'reasoning'\s*:\s*'([^']*)'",   # Single quotes
+    ]
+    
+    for pattern in reasoning_patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            result["reasoning"] = match.group(1).strip()
+            break
+    
+    return result if result else None
+
+
+def _fix_json_string(text: str) -> str:
+    """Apply common JSON fixes."""
+    # Remove trailing commas before closing braces/brackets
+    import re
+    text = re.sub(r',(\s*[}\]])', r'\1', text)
+    # Fix single quotes to double quotes (basic)
+    text = text.replace("'", '"')
+    return text
+
+
+def _extract_outermost_json(text: str) -> dict | None:
+    """Extract the outermost JSON object from text, handling nesting."""
+    brace_count = 0
+    start_idx = -1
+    for i, char in enumerate(text):
+        if char == '{':
+            if brace_count == 0:
+                start_idx = i
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+            if brace_count == 0 and start_idx != -1:
+                try:
+                    return json.loads(text[start_idx:i+1])
+                except json.JSONDecodeError:
+                    continue
+    return None
+
+
+def _extract_json_with_regex(text: str) -> list[dict] | None:
+    """Fallback JSON extraction using regex for malformed responses."""
+    results = []
+    
+    # Try to find JSON objects in code blocks
+    json_pattern = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+    if json_pattern:
+        try:
+            results.append(json.loads(json_pattern.group(1)))
+        except json.JSONDecodeError:
+            # Try with fixes
+            try:
+                fixed = _fix_json_string(json_pattern.group(1))
+                results.append(json.loads(fixed))
+            except json.JSONDecodeError:
+                pass
+    
+    # Try to find any JSON-like structure with "response" key
+    response_pattern = re.search(r'"response"\s*:\s*"([^"]*)"', text)
+    if response_pattern and not results:
+        results.append({"response": response_pattern.group(1)})
+    
+    # Try to find JSON without code blocks (look for { ... } patterns)
+    if not results:
+        # Find all potential JSON objects
+        potential_jsons = re.findall(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
+        for pj in potential_jsons:
+            try:
+                obj = json.loads(pj)
+                if "response" in obj or "reasoning" in obj:
+                    results.append(obj)
+            except json.JSONDecodeError:
+                try:
+                    fixed = _fix_json_string(pj)
+                    obj = json.loads(fixed)
+                    if "response" in obj or "reasoning" in obj:
+                        results.append(obj)
+                except json.JSONDecodeError:
+                    continue
+    
+    return results or None
+
+
+def _generate_cache_key(inputs: dict) -> str:
+    """Generate a cache key from grading inputs for deduplication."""
+    # Create a deterministic key from the essential inputs
+    key_data = {
+        "problem": inputs.get("problem", ""),
+        "solution": inputs.get("solution", ""),
+        "student_answer": inputs.get("student_answer", ""),
+        "guidelines": inputs.get("grading_guidelines", ""),
+    }
+    key_str = json.dumps(key_data, sort_keys=True)
+    return hashlib.sha256(key_str.encode()).hexdigest()[:32]
+
+
+def clear_response_cache() -> int:
+    """Clear the response cache and return the number of entries cleared."""
+    global _response_cache
+    count = len(_response_cache)
+    _response_cache.clear()
+    return count
+
+
+def get_cache_stats() -> dict:
+    """Get current cache statistics."""
+    return {
+        "entries": len(_response_cache),
+        "size_bytes": sum(len(json.dumps({"p": p, "r": r})) for p, r in _response_cache.values()),
+    }
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems with chain-of-thought reasoning."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "", use_cache: bool = True) -> None:
+        self.model = model
+        self.log_fn = logger.info
+        self.max_retries = 3
+        self._extraction_stats = {"success": 0, "fallback": 0, "failed": 0}
+        self._use_cache = use_cache
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+    def _get_domain_specific_guidance(self, domain: str) -> str:
+        """Get domain-specific grading guidance."""
+        guidance = {
+            "math": """For mathematical proof problems:
+
+**CRITICAL DISTINCTIONS - READ CAREFULLY:**
+
+**Correct vs Almost:**
+- Correct: The proof is COMPLETE and CORRECT. Every step is valid, all cases are covered, and the conclusion is rigorously established. NO gaps, NO errors.
+- Almost: The proof is NEARLY COMPLETE with the RIGHT CORE APPROACH, but has SPECIFIC MINOR issues that need fixing. The student clearly understands the problem but made small errors. The solution is >80% complete.
+
+**Almost vs Partial (THIS IS THE HARDEST DISTINCTION):**
+- Almost: The solution is SUBSTANTIALLY COMPLETE (>80%). The student has the right idea, made significant progress, and only needs minor fixes. The core proof structure is there.
+  * Examples: Small calculation errors, missing one minor case, slightly incomplete justification for a step
+  * Key test: If fixing 1-2 small issues would make it Correct, it's Almost
+  
+- Partial: The solution shows MEANINGFUL PROGRESS (40-70% complete) but has SIGNIFICANT gaps or missing key steps. The student understands the problem but the solution is NOT close to done.
+  * Examples: Missing major proof sections, significant errors in key steps, incomplete core argument
+  * Key test: If the solution needs substantial additional work to be complete, it's Partial
+
+**Partial vs Incorrect:**
+- Partial: Demonstrates understanding of the problem and makes genuine progress toward the solution. Has some correct reasoning.
+- Incorrect: Wrong approach, fundamental errors, or no meaningful progress. Little to no correct reasoning.
+
+**DECISION TREE:**
+1. Is it 100% complete and correct? → Correct
+2. Is it >80% complete with only minor fixes needed? → Almost
+3. Is it 40-70% complete with significant gaps but real understanding? → Partial
+4. Is it <40% complete or fundamentally wrong? → Incorrect
+
+**Key considerations:**
+- Check if the proof structure follows logical steps
+- Verify key lemmas and theorems are applied correctly
+- Look for gaps in reasoning that need to be filled
+- Consider if alternative valid approaches are used
+- Check if the conclusion properly follows from the premises
+- BE STRICT about Correct: If there are ANY non-trivial gaps or errors, it's NOT Correct
+- USE Almost MORE OFTEN: Many solutions that are "mostly correct" should be Almost, not Partial""",
+            "code": """For programming problems:
+- Verify the code produces correct output for the given examples
+- Check for proper handling of edge cases
+- Code style matters less than correctness, but syntax errors are critical
+- Partial credit for correct algorithm but minor implementation bugs
+- Time/space complexity should be reasonable but not strictly graded""",
+            "logic": """For logic puzzles:
+- Verify the reasoning chain is sound and complete
+- Check that all constraints are satisfied
+- Alternative valid deductions should be accepted
+- Partial credit for correct partial deductions
+- The final answer must be explicitly stated""",
+        }
+        return guidance.get(domain.lower(), "")
+
+    def _build_grading_prompt(self, inputs: dict) -> str:
+        """Build a structured prompt for the grading task with chain-of-thought."""
+        domain = inputs.get("domain", "unknown")
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+        
+        # Get domain-specific guidance
+        domain_guidance = self._get_domain_specific_guidance(domain)
+        
+        # Build the prompt
+        prompt_parts = [
+            f"You are an expert grader for {domain} problems. Your task is to evaluate a student's answer against the correct solution and grading guidelines.",
+            "",
+            "## Problem Statement",
+            problem,
+            "",
+            "## Correct Solution",
+            solution,
+        ]
+        
+        # Add guidelines if present
+        if guidelines:
+            prompt_parts.extend([
+                "",
+                "## Grading Guidelines (from problem set)",
+                guidelines,
+                "",
+                "### How to interpret these guidelines:",
+                "- The (Partial) section lists what partial credit achievements look like",
+                "- The (Almost) section describes what an 'Almost' grade looks like - nearly complete with minor issues",
+                "- If the student's answer meets the (Almost) criteria -> grade as 'Almost'",
+                "- If the student's answer meets some (Partial) criteria but not (Almost) -> grade as 'Partial'",
+                "- If the student's answer goes beyond (Partial) and (Almost) to be essentially complete -> grade as 'Correct'",
+                "- If the student's answer doesn't meet (Partial) criteria -> grade as 'Incorrect'",
+            ])
+        
+        # Add domain-specific guidance if available
+        if domain_guidance:
+            prompt_parts.extend([
+                "",
+                "## Domain-Specific Guidance",
+                domain_guidance,
+            ])
+        
+        prompt_parts.extend([
+            "",
+            "## Student's Answer",
+            student_answer,
+            "",
+            "## Instructions",
+            "1. First, analyze the student's answer step by step. Compare it against the correct solution.",
+            "2. Identify any errors, omissions, or alternative valid approaches.",
+            "3. Consider the grading guidelines and domain-specific guidance carefully.",
+            "4. Provide your reasoning for the grade you will assign.",
+            "5. Finally, provide your grade/assessment in the JSON format below.",
+            "",
+            "## Grading Rubric",
+            "You MUST assign exactly ONE of these four grades:",
+            "",
+            "- **Correct**: The answer is FULLY CORRECT with complete reasoning and correct final result. The solution is essentially complete and correct. NO gaps, NO errors, NO missing steps. If there's ANY non-trivial issue, it's NOT Correct.",
+            "- **Almost**: The solution is SUBSTANTIALLY COMPLETE (>80%) with the RIGHT CORE APPROACH, but has SPECIFIC MINOR mistakes or gaps. The student clearly understands the problem but made small errors that need correction. The solution is NEARLY there - fixing 1-2 small issues would make it Correct. This is for solutions that are 'mostly correct' or 'nearly done'.",
+            "- **Partial**: The answer shows MEANINGFUL PROGRESS (40-70% complete) toward the solution with some correct reasoning, but has SIGNIFICANT gaps, missing key steps, or notable errors. The student demonstrates understanding but the solution is NOT close to done. This is for 'good effort but incomplete'.",
+            "- **Incorrect**: The answer contains FUNDAMENTAL ERRORS, uses a WRONG APPROACH, or shows NO MEANINGFUL PROGRESS. Little to no correct reasoning. The student doesn't understand the problem.",
+            "",
+            "## How to Decide (BE STRICT)",
+            "1. Is the answer 100% complete and correct with no issues? -> **Correct**",
+            "2. Is it >80% complete with the right approach and only minor fixes needed? -> **Almost**",
+            "3. Is it 40-70% complete with real understanding but significant gaps? -> **Partial**",
+            "4. Is it <40% complete or fundamentally wrong? -> **Incorrect**",
+            "",
+            "## Step-by-Step Grading Process",
+            "1. **Read the problem carefully** - Understand what is being asked",
+            "2. **Study the correct solution** - Know what a complete answer looks like",
+            "3. **Analyze the student's answer** - Go through it line by line",
+            "4. **Identify what's correct** - Note all correct steps and reasoning",
+            "5. **Identify what's wrong/missing** - Note errors, gaps, omissions",
+            "6. **Calculate completeness** - Estimate what percentage is done (0%, 25%, 50%, 75%, 100%)",
+            "7. **Apply the decision tree above** - Map completeness to grade",
+            "8. **Double-check** - Would another grader agree? Is your grade consistent with the rubric?",
+            "",
+            "## Common Mistakes to Avoid",
+            "- DON'T be afraid to use 'Almost' - many solutions that are 'mostly correct' should be Almost, not Partial",
+            "- DON'T grade 'Partial' as 'Correct' just because there's some good work - be strict about completeness",
+            "- DON'T grade 'Incorrect' for solutions that show real understanding, even if incomplete",
+            "- DO use 'Almost' when the student clearly understands the problem but made specific minor errors",
+            "- DO use 'Partial' when the solution is incomplete and needs substantial work to be done",
+            "",
+            "## Examples of Each Grade",
+            "",
+            "**Example of Correct:**",
+            "- Complete proof with all steps justified",
+            "- Correct final answer with proper reasoning",
+            "- No gaps or errors",
+            "- All cases covered, all lemmas proven",
+            "",
+            "**Example of Almost:**",
+            "- Proof is nearly complete but has a small calculation error in one step",
+            "- Correct approach but missing justification for one minor lemma",
+            "- Solution is 90% complete, just needs 1-2 small fixes",
+            "- Right idea, minor slip in execution that doesn't affect the main argument",
+            "- Almost correct but missed one edge case that was explicitly mentioned",
+            "",
+            "**Example of Partial:**",
+            "- Proof has the right idea but is missing the main argument",
+            "- Correct start but significant portion is incomplete or has major errors",
+            "- Solution is 50% complete, needs substantial work to finish",
+            "- Shows understanding but key steps are missing or wrong",
+            "- Good attempt but fundamentally incomplete solution",
+            "",
+            "**Example of Incorrect:**",
+            "- Wrong approach entirely",
+            "- No meaningful progress toward solution",
+            "- Fundamental misunderstanding of the problem",
+            "- Answer is completely unrelated to the question",
+            "- No correct reasoning at all",
+            "",
+            "## Response Format (REQUIRED)",
+            "You MUST respond with valid JSON wrapped in <json>...</json> tags. Do not include any text outside the JSON tags.",
+            "",
+            "<json>",
+            '{',
+            '    "reasoning": "Your detailed step-by-step analysis and reasoning...",',
+            '    "response": "Your final grade: must be one of Correct, Almost, Partial, or Incorrect"',
+            '}',
+            "</json>",
+            "",
+            "IMPORTANT: The 'response' field must contain ONLY one of these exact values: Correct, Almost, Partial, or Incorrect. No other text.",
+        ])
+        
+        return "\n".join(prompt_parts)
+
+    def _normalize_prediction(self, prediction: str) -> str:
+        """Normalize prediction to one of the valid labels."""
+        if not prediction:
+            return "None"
+        
+        # Clean up the prediction
+        pred = prediction.strip().lower()
+        
+        # Remove common prefixes/suffixes and punctuation
+        pred = pred.replace("grade:", "").replace("final grade:", "").replace("assessment:", "").strip()
+        pred = pred.replace(".", "").replace("!", "").replace("?", "").replace("'", "").replace('"', "").strip()
+        
+        # Map to valid labels
+        valid_labels = ["correct", "almost", "partial", "incorrect"]
+        
+        # Check for exact match first (case insensitive)
+        for label in valid_labels:
+            if pred == label:
+                return label.capitalize()
+        
+        # Check for exact match with leading/trailing whitespace
+        for label in valid_labels:
+            if pred.strip() == label:
+                return label.capitalize()
+        
+        # Check for partial matches - be careful about "almost" vs "correct"
+        # Check for "almost" first to avoid matching "almost correct" as "correct"
+        if "almost" in pred:
+            return "Almost"
+        
+        for label in valid_labels:
+            if label in pred:
+                return label.capitalize()
+        
+        # Check for common variations and synonyms - ordered by specificity
+        # Correct synonyms (highest priority for positive indicators)
+        correct_indicators = ["full", "right", "complete", "perfect", "exact", "valid", "sound", "proper"]
+        for indicator in correct_indicators:
+            if indicator in pred:
+                return "Correct"
+        
+        # Almost synonyms (nearly there but not quite)
+        almost_indicators = ["nearly", "minor", "small error", "needs fix", "close", "mostly", "nearly there", "small issue", "tiny error", "slight"]
+        for indicator in almost_indicators:
+            if indicator in pred:
+                return "Almost"
+        
+        # Partial synonyms (some progress but significant gaps)
+        partial_indicators = ["some", "incomplete", "missing", "gap", "part", "half", "portion", "fragment", "in progress", "started", "attempted"]
+        for indicator in partial_indicators:
+            if indicator in pred:
+                return "Partial"
+        
+        # Incorrect synonyms (fundamental problems)
+        incorrect_indicators = ["wrong", "error", "fail", "none", "fundamental", "bad", "invalid", "unsound", "broken", "doesn't work", "not working"]
+        for indicator in incorrect_indicators:
+            if indicator in pred:
+                return "Incorrect"
+        
+        return "None"
+
+    def _extract_prediction(self, text: str) -> tuple[str, str]:
+        """Extract prediction and reasoning from response text.
+        
+        Returns:
+            (prediction, reasoning) tuple
+        """
+        prediction = "None"
+        reasoning = ""
+        
+        # Try primary extraction method
+        extracted = _extract_jsons(text)
+        if extracted is not None:
+            self._extraction_stats["success"] += 1
+            self.log_fn("JSON extraction: primary method succeeded")
+        else:
+            # Fallback to regex extraction
+            extracted = _extract_json_with_regex(text)
+            if extracted is not None:
+                self._extraction_stats["fallback"] += 1
+                self.log_fn("JSON extraction: fallback method succeeded")
+            else:
+                self._extraction_stats["failed"] += 1
+                self.log_fn("JSON extraction: all methods failed")
+        
+        if extracted:
+            last_json = extracted[-1]
+            if "response" in last_json:
+                raw_prediction = str(last_json["response"]).strip()
+                prediction = self._normalize_prediction(raw_prediction)
+                self.log_fn(f"Raw prediction: '{raw_prediction}' -> Normalized: '{prediction}'")
+            if "reasoning" in last_json:
+                reasoning = str(last_json["reasoning"]).strip()
+        
+        return prediction, reasoning
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Check cache first if enabled
+        if self._use_cache:
+            cache_key = _generate_cache_key(inputs)
+            if cache_key in _response_cache:
+                self._cache_hits += 1
+                cached_prediction, cached_reasoning = _response_cache[cache_key]
+                self.log_fn(f"Cache hit! Using cached result: {cached_prediction}")
+                # Return a minimal msg_history for cache hits
+                return str(cached_prediction), [{"role": "assistant", "text": f"[Cached] {cached_reasoning}"}]
+            self._cache_misses += 1
+        
+        instruction = self._build_grading_prompt(inputs)
+        
+        msg_history = []
+        prediction = "None"
+        reasoning = ""
+        
+        # Retry loop for robust extraction
+        for attempt in range(self.max_retries):
+            try:
+                response, msg_history, info = get_response_from_llm(
+                    msg=instruction,
+                    model=self.model,
+                    msg_history=msg_history if attempt > 0 else [],
+                )
+                
+                last_text = msg_history[-1]["text"] if msg_history else ""
+                prediction, reasoning = self._extract_prediction(last_text)
+                
+                if prediction != "None":
+                    self.log_fn(f"Successfully extracted prediction: {prediction}")
+                    if reasoning:
+                        self.log_fn(f"Reasoning: {reasoning[:200]}...")
+                    break
+                else:
+                    self.log_fn(f"Attempt {attempt + 1}: Failed to extract prediction, retrying...")
+                    # Add feedback for retry with more specific guidance
+                    if attempt < self.max_retries - 1:
+                        instruction = f"""ERROR: Your previous response did not contain valid JSON with a 'response' field.
+
+Your response was:
+---
+{last_text[:500]}
+---
+
+You MUST respond with ONLY valid JSON wrapped in <json>...</json> tags. Do not include any text before or after the JSON tags.
+
+Correct format:
+<json>
+{{
+    "reasoning": "Your detailed analysis here...",
+    "response": "Correct"
+}}
+</json>
+
+IMPORTANT: 
+- The JSON must be valid (no trailing commas, proper quotes)
+- Both 'reasoning' and 'response' fields are required
+- The 'response' field must be exactly one of: Correct, Almost, Partial, or Incorrect
+
+REMEMBER THE GRADING CRITERIA:
+- Correct: 100% complete and correct, no issues
+- Almost: >80% complete with right approach, only minor fixes needed (e.g., small errors, missing one case)
+- Partial: 40-70% complete with real understanding but significant gaps (needs substantial work)
+- Incorrect: <40% complete or fundamentally wrong
+
+KEY TIP: Many solutions are closer to done than you think! If fixing 1-2 small issues would make it correct, use "Almost" not "Partial".
+
+Now try again with the original task:
+
+{self._build_grading_prompt(inputs)}"""
+                    
+            except Exception as e:
+                self.log_fn(f"Error in attempt {attempt + 1}: {e}")
+                if attempt == self.max_retries - 1:
+                    prediction = f"Error: {e}"
+        
+        # Store in cache if successful
+        if self._use_cache and prediction != "None" and not prediction.startswith("Error:"):
+            _response_cache[cache_key] = (prediction, reasoning)
+            self.log_fn(f"Cached result for key: {cache_key[:16]}...")
+        
+        # Log extraction statistics periodically
+        total = sum(self._extraction_stats.values())
+        if total > 0 and total % 10 == 0:
+            self.log_fn(f"Extraction stats after {total} attempts: {self._extraction_stats}")
+            if self._use_cache:
+                cache_total = self._cache_hits + self._cache_misses
+                if cache_total > 0:
+                    hit_rate = self._cache_hits / cache_total * 100
+                    self.log_fn(f"Cache stats: {self._cache_hits} hits, {self._cache_misses} misses ({hit_rate:.1f}% hit rate)")
+        
+        return str(prediction), msg_history

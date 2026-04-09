@@ -1,0 +1,6 @@
+{
+  "parent": 24,
+  "forked_from": 24,
+  "valid": false,
+  "error": "LLMClient.chat() got an unexpected keyword argument 'max_tokens'"
+}

@@ -1,0 +1,26 @@
+{
+  "overall_accuracy": 0.6,
+  "normalized_mean_absolute_error": 0.3,
+  "total_correct": 6,
+  "total": 10,
+  "accuracy_by_label": {
+    "correct": {
+      "precision": 0.8,
+      "recall": 1.0,
+      "correct": 4,
+      "total": 4
+    },
+    "incorrect": {
+      "precision": 1.0,
+      "recall": 0.4,
+      "correct": 2,
+      "total": 5
+    },
+    "partial": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "correct": 0,
+      "total": 1
+    }
+  }
+}

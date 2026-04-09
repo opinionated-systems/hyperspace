@@ -1,0 +1,383 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+
+Enhancements:
+- Improved JSON extraction with multiple fallback strategies
+- Better error handling and logging
+- Response validation with schema checking
+- Configurable extraction parameters
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import Any
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    """
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            continue
+    return results or None
+
+
+def _extract_json_from_markdown(text: str) -> list[dict] | None:
+    """Extract JSON from markdown code blocks (```json ... ```).
+    
+    This provides an additional fallback when <json> tags are not used.
+    """
+    results = []
+    # Match ```json ... ``` or ``` ... ``` blocks
+    pattern = r'```(?:json)?\s*\n?(.*?)\n?```'
+    matches = re.findall(pattern, text, re.DOTALL)
+    
+    for match in matches:
+        try:
+            # Try to parse the content as JSON
+            data = json.loads(match.strip())
+            if isinstance(data, dict):
+                results.append(data)
+        except json.JSONDecodeError:
+            # Try to find JSON objects within the block
+            try:
+                # Look for JSON-like structures
+                json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+                json_matches = re.findall(json_pattern, match, re.DOTALL)
+                for json_str in json_matches:
+                    data = json.loads(json_str)
+                    if isinstance(data, dict):
+                        results.append(data)
+            except json.JSONDecodeError:
+                continue
+    
+    return results or None
+
+
+def _extract_json_with_retry(text: str, max_retries: int = 2) -> list[dict] | None:
+    """Extract JSON with multiple fallback strategies.
+
+    First tries standard extraction from <json> tags, then attempts to fix
+    common JSON formatting issues like trailing commas, and finally tries
+    markdown code block extraction.
+    """
+    # First attempt: standard extraction from <json> tags
+    result = _extract_jsons(text)
+    if result:
+        logger.debug(f"JSON extraction succeeded from <json> tags: {len(result)} objects")
+        return result
+
+    # Second attempt: markdown code blocks
+    result = _extract_json_from_markdown(text)
+    if result:
+        logger.debug(f"JSON extraction succeeded from markdown blocks: {len(result)} objects")
+        return result
+
+    # Retry with common fixes for malformed JSON
+    for attempt in range(max_retries):
+        try:
+            # Use the comprehensive sanitizer
+            fixed_text = _sanitize_json_string(text)
+            result = _extract_jsons(fixed_text)
+            if result:
+                logger.debug(f"JSON extraction succeeded after fix attempt {attempt + 1}")
+                return result
+            # Try markdown extraction on fixed text too
+            result = _extract_json_from_markdown(fixed_text)
+            if result:
+                logger.debug(f"Markdown JSON extraction succeeded after fix attempt {attempt + 1}")
+                return result
+        except Exception:
+            pass
+
+    logger.warning("All JSON extraction strategies failed")
+    return None
+
+
+def _validate_response_schema(data: dict, required_keys: list[str]) -> tuple[bool, str]:
+    """Validate that the response contains required keys.
+    
+    Args:
+        data: The parsed JSON data
+        required_keys: List of keys that must be present
+        
+    Returns:
+        (is_valid, error_message)
+    """
+    missing_keys = [key for key in required_keys if key not in data]
+    if missing_keys:
+        return False, f"Missing required keys: {missing_keys}"
+    return True, ""
+
+
+def _safe_extract_prediction(extracted: list[dict] | None,
+                              key: str = "response",
+                              default: Any = "None") -> Any:
+    """Safely extract a prediction from extracted JSON data.
+
+    Args:
+        extracted: List of extracted JSON objects
+        key: The key to extract from the last object
+        default: Default value if extraction fails
+
+    Returns:
+        The extracted value or default
+    """
+    if not extracted or not isinstance(extracted, list):
+        return default
+
+    if len(extracted) == 0:
+        return default
+
+    last_item = extracted[-1]
+    if not isinstance(last_item, dict):
+        return default
+
+    return last_item.get(key, default)
+
+
+def _sanitize_json_string(text: str) -> str:
+    """Sanitize a string to make it more likely to be valid JSON.
+
+    Handles common issues like:
+    - Trailing commas before closing braces/brackets
+    - Single quotes instead of double quotes
+    - Unescaped newlines in strings
+    - Control characters
+
+    Args:
+        text: The raw text to sanitize
+
+    Returns:
+        Sanitized text that should be more parseable as JSON
+    """
+    # Remove trailing commas before closing braces/brackets
+    text = re.sub(r',(\s*[}\]])', r'\1', text)
+
+    # Replace single quotes with double quotes (basic handling)
+    # This is a best-effort approach and may not handle all cases
+    text = re.sub(r"'([^']*?)'(?=\s*:)", r'"\1"', text)  # Keys
+    text = re.sub(r":\s*'([^']*?)'(?=\s*[,}\]])", r': "\1"', text)  # Values
+
+    # Remove control characters except tab, newline, carriage return
+    text = ''.join(char for char in text if ord(char) >= 32 or char in '\t\n\r')
+
+    return text
+
+
+def _format_response_for_display(response: Any, max_length: int = 1000) -> str:
+    """Format a response for display/logging purposes.
+    
+    Args:
+        response: The response to format (can be any type)
+        max_length: Maximum length before truncation
+        
+    Returns:
+        Formatted string representation suitable for logging
+    """
+    if response is None:
+        return "None"
+    
+    # Handle nested structures
+    if isinstance(response, (dict, list)):
+        try:
+            text = json.dumps(response, default=str, indent=2)
+        except (TypeError, ValueError):
+            text = str(response)
+    else:
+        text = str(response)
+    
+    # Truncate if too long
+    if len(text) > max_length:
+        return text[:max_length - 3] + "..."
+    return text
+
+
+def _extract_confidence_score(extracted: list[dict] | None) -> float | None:
+    """Extract confidence score from response if available.
+    
+    Args:
+        extracted: List of extracted JSON objects
+        
+    Returns:
+        Confidence score between 0.0 and 1.0, or None if not found
+    """
+    if not extracted or not isinstance(extracted, list):
+        return None
+    
+    for data in reversed(extracted):
+        if isinstance(data, dict):
+            # Check for common confidence key names
+            for key in ["confidence", "confidence_score", "score", "certainty"]:
+                if key in data:
+                    try:
+                        score = float(data[key])
+                        return max(0.0, min(1.0, score))  # Clamp to [0, 1]
+                    except (ValueError, TypeError):
+                        continue
+    return None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems with enhanced validation.
+    
+    This agent uses an LLM to process grading tasks and extract structured
+    responses. It includes robust JSON extraction with multiple fallback
+    strategies and comprehensive error handling.
+    """
+
+    def __init__(
+        self, 
+        model: str = EVAL_MODEL, 
+        log_file: str = "",
+        required_keys: list[str] | None = None,
+        response_key: str = "response",
+        default_response: Any = "None"
+    ) -> None:
+        """Initialize the TaskAgent.
+        
+        Args:
+            model: The LLM model to use for inference
+            log_file: Path to log file (currently unused, for compatibility)
+            required_keys: List of required keys in the JSON response
+            response_key: The key to extract from the response
+            default_response: Default value if extraction fails
+        """
+        self.model = model
+        self.log_fn = logger.info
+        self.required_response_keys = required_keys or ["response"]
+        self.response_key = response_key
+        self.default_response = default_response
+
+    def _build_instruction(self, inputs: dict) -> str:
+        """Build the instruction prompt for the LLM.
+        
+        Args:
+            inputs: Task input dictionary
+            
+        Returns:
+            Formatted instruction string
+        """
+        return f"""You are an expert grading agent. Your task is to evaluate student answers based on the provided problem, solution, and grading guidelines.
+
+Task input:
+```
+{json.dumps(inputs, indent=2, default=str)}
+```
+
+Analyze the problem carefully and provide your evaluation in the following JSON format:
+<json>
+{{
+    "response": "Your detailed evaluation here"
+}}
+</json>
+
+Ensure your response is valid JSON and follows the specified schema exactly."""
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        instruction = self._build_instruction(inputs)
+
+        try:
+            response, msg_history, info = get_response_from_llm(
+                msg=instruction,
+                model=self.model,
+                msg_history=[],
+            )
+        except Exception as e:
+            self.log_fn(f"LLM call failed: {e}")
+            return str(self.default_response), []
+
+        # Extract prediction from JSON with retry mechanism and validation
+        prediction = self.default_response
+        try:
+            if not msg_history or len(msg_history) < 2:
+                self.log_fn("Invalid message history from LLM")
+                return str(prediction), msg_history
+                
+            last_message = msg_history[-1].get("text", "")
+            if not last_message:
+                self.log_fn("Empty response from LLM")
+                return str(prediction), msg_history
+            
+            extracted = _extract_json_with_retry(last_message)
+            
+            if extracted:
+                # Validate schema
+                is_valid, error_msg = _validate_response_schema(
+                    extracted[-1], 
+                    self.required_response_keys
+                )
+                
+                if is_valid:
+                    prediction = _safe_extract_prediction(
+                        extracted, 
+                        self.response_key, 
+                        self.default_response
+                    )
+                    # Use new formatting helper for cleaner logs
+                    display_pred = _format_response_for_display(prediction, max_length=200)
+                    self.log_fn(f"Successfully extracted prediction: {display_pred}")
+                    
+                    # Extract confidence score if available (for future use)
+                    confidence = _extract_confidence_score(extracted)
+                    if confidence is not None:
+                        self.log_fn(f"Confidence score: {confidence:.2f}")
+                else:
+                    self.log_fn(f"Schema validation failed: {error_msg}")
+                    # Try to extract anyway as a fallback
+                    prediction = _safe_extract_prediction(
+                        extracted, 
+                        self.response_key, 
+                        self.default_response
+                    )
+            else:
+                self.log_fn("No JSON data extracted from response")
+                # Try to extract any meaningful text as fallback
+                if last_message.strip():
+                    # Remove common formatting artifacts
+                    cleaned = re.sub(r'<json>|</json>|```json|```', '', last_message)
+                    cleaned = cleaned.strip()
+                    if cleaned:
+                        prediction = cleaned[:500]  # Limit length
+                        
+        except Exception as e:
+            self.log_fn(f"Error extracting prediction: {e}")
+
+        return str(prediction), msg_history

@@ -1,0 +1,302 @@
+"""
+Task agent: solves a given task with a single LLM call.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks or raw JSON.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    Also tries to find raw JSON objects if tags are not present.
+    """
+    results = []
+    search_from = 0
+    
+    # First try to find <json>...</json> blocks
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            continue
+    
+    # Also try to find ```json code blocks
+    search_from = 0
+    while True:
+        start = text.find("```json", search_from)
+        if start == -1:
+            break
+        end = text.find("```", start + 7)
+        if end == -1:
+            break
+        inner = text[start + 7:end].strip()
+        search_from = end + 3
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            continue
+    
+    # If no results, try to find raw JSON objects (looking for {...})
+    if not results:
+        # Find JSON objects by looking for balanced braces
+        i = 0
+        while i < len(text):
+            if text[i] == '{':
+                # Try to find the matching closing brace
+                brace_count = 1
+                j = i + 1
+                while j < len(text) and brace_count > 0:
+                    if text[j] == '{':
+                        brace_count += 1
+                    elif text[j] == '}':
+                        brace_count -= 1
+                    j += 1
+                
+                if brace_count == 0:
+                    json_str = text[i:j].strip()
+                    try:
+                        results.append(json.loads(json_str))
+                    except json.JSONDecodeError:
+                        pass
+                i = j
+            else:
+                i += 1
+    
+    return results or None
+
+
+def _extract_grade_from_text(text: str) -> str | None:
+    """Extract grade from various formats in the text."""
+    # Priority 1: Look for JSON grade field patterns
+    json_patterns = [
+        r'"grade"\s*:\s*"([^"]*)"',
+        r'"grade"\s*:\s*\'([^\']*)\'',
+        r'"grade"\s*:\s*([a-zA-Z]+)',
+        r'"response"\s*:\s*"([^"]*)"',
+        r'"prediction"\s*:\s*"([^"]*)"',
+        r'"result"\s*:\s*"([^"]*)"',
+    ]
+    
+    for pattern in json_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            grade = match.group(1).strip().lower()
+            if grade in ['correct', 'incorrect', 'partial', 'almost']:
+                return grade
+    
+    # Priority 2: Look for explicit grade assignments in text
+    text_patterns = [
+        r'\bgrade\s*[:=]\s*([a-zA-Z]+)',
+        r'\bfinal\s+grade\s*[:=]\s*([a-zA-Z]+)',
+        r'\bassigned\s+grade\s*[:=]\s*([a-zA-Z]+)',
+        r'\bthe\s+grade\s+is\s+([a-zA-Z]+)',
+        r'\bi\s+assign\s+([a-zA-Z]+)',
+        r'\bthis\s+is\s+([a-zA-Z]+)\b',
+    ]
+    
+    for pattern in text_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            grade = match.group(1).strip().lower()
+            if grade in ['correct', 'incorrect', 'partial', 'almost']:
+                return grade
+    
+    # Priority 3: Look for standalone grade keywords in the last 100 words
+    # This is where the conclusion typically appears
+    words = text.lower().split()
+    last_part = ' '.join(words[-100:])
+    
+    # Check in order of specificity (more specific first)
+    if 'almost' in last_part:
+        return 'almost'
+    elif 'partial' in last_part:
+        return 'partial'
+    elif 'incorrect' in last_part:
+        return 'incorrect'
+    elif 'correct' in last_part:
+        return 'correct'
+    
+    return None
+
+
+def _normalize_grade(grade: str) -> str:
+    """Normalize grade to one of the expected lowercase values."""
+    if not grade:
+        return "none"
+    
+    grade_lower = grade.lower().strip().strip('"').strip("'")
+    
+    # Map to standard grades
+    if grade_lower in ["correct", "incorrect", "partial", "almost"]:
+        return grade_lower
+    
+    # Partial matches as fallback
+    if "almost" in grade_lower:
+        return "almost"
+    elif "partial" in grade_lower:
+        return "partial"
+    elif "incorrect" in grade_lower:
+        return "incorrect"
+    elif "correct" in grade_lower:
+        return "correct"
+    
+    return "none"
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract fields from inputs for better prompt construction
+        domain = inputs.get("domain", "")
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+
+        instruction = f"""You are an expert mathematical olympiad grader. Grade the student's solution based on the official solution and grading guidelines.
+
+## Problem:
+{problem}
+
+## Official Solution:
+{solution}
+
+## Student's Answer:
+{student_answer}
+
+## Grading Guidelines (FOLLOW THESE EXACTLY):
+{grading_guidelines}
+
+## Grade Definitions:
+- **correct**: Complete, correct solution with valid proof
+- **incorrect**: Wrong, fundamental errors, no meaningful progress
+- **partial**: Significant progress but incomplete (found invariant/lemma but didn't finish)
+- **almost**: Nearly complete, only minor errors/gaps
+
+## Critical Rules:
+1. The grading guidelines explicitly state what constitutes each grade - FOLLOW THEM
+2. If guidelines list criteria under (Partial), solutions meeting those criteria MUST be graded PARTIAL
+3. Only grade INCORRECT if there is NO meaningful progress
+4. When uncertain, choose the LOWER grade
+
+## Response Format (JSON ONLY):
+<json>
+{{
+    "grade": "correct" | "incorrect" | "partial" | "almost"
+}}
+</json>
+
+Grade:"""
+
+        response, msg_history, info = get_response_from_llm(
+            msg=instruction,
+            model=self.model,
+            msg_history=[],
+        )
+
+        # Extract prediction from JSON
+        prediction = "none"
+        valid_grades = ["correct", "incorrect", "partial", "almost"]
+        
+        try:
+            last_message = msg_history[-1]["text"]
+            extracted = _extract_jsons(last_message)
+            
+            # Try to find a valid grade in any extracted JSON
+            if extracted:
+                for json_obj in reversed(extracted):  # Check from last to first
+                    if isinstance(json_obj, dict):
+                        # Try common grade field names
+                        for field in ["grade", "response", "result", "prediction"]:
+                            if field in json_obj:
+                                val = str(json_obj[field]).lower().strip().strip('"').strip("'")
+                                if val in valid_grades:
+                                    prediction = val
+                                    break
+                        if prediction in valid_grades:
+                            break
+                        # If no standard field found, try any string value in the JSON
+                        if prediction == "none":
+                            for val in json_obj.values():
+                                val_str = str(val).lower().strip().strip('"').strip("'")
+                                if val_str in valid_grades:
+                                    prediction = val_str
+                                    break
+            
+            # If still no valid grade, try text extraction patterns
+            if prediction not in valid_grades:
+                extracted_text = _extract_grade_from_text(last_message)
+                if extracted_text:
+                    prediction = extracted_text
+            
+            # Last resort: look for quoted grades in the text
+            if prediction not in valid_grades:
+                text_lower = last_message.lower()
+                # Priority order for quoted grades (more specific first)
+                if '"almost"' in text_lower or "'almost'" in text_lower:
+                    prediction = "almost"
+                elif '"partial"' in text_lower or "'partial'" in text_lower:
+                    prediction = "partial"
+                elif '"incorrect"' in text_lower or "'incorrect'" in text_lower:
+                    prediction = "incorrect"
+                elif '"correct"' in text_lower or "'correct'" in text_lower:
+                    prediction = "correct"
+                else:
+                    # Look for unquoted grades in the last part of the text
+                    # (where the conclusion typically appears)
+                    words = text_lower.split()
+                    last_part = ' '.join(words[-100:])
+                    if 'almost' in last_part:
+                        prediction = "almost"
+                    elif 'partial' in last_part:
+                        prediction = "partial"
+                    elif 'incorrect' in last_part:
+                        prediction = "incorrect"
+                    elif 'correct' in last_part:
+                        prediction = "correct"
+                        
+        except Exception as e:
+            self.log_fn(f"Error extracting prediction: {e}")
+
+        # Normalize prediction to expected values
+        prediction = _normalize_grade(prediction)
+
+        return str(prediction), msg_history

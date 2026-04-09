@@ -1,0 +1,1291 @@
+"""
+Task agent: solves a given task with a single LLM call.
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks."""
+    results = []
+    search_from = 0
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        try:
+            results.append(json.loads(inner))
+        except json.JSONDecodeError:
+            # Try to fix common JSON issues
+            try:
+                # Remove trailing commas before closing braces/brackets
+                fixed = re.sub(r',(\s*[}\]])', r'\1', inner)
+                results.append(json.loads(fixed))
+            except json.JSONDecodeError:
+                # Try more aggressive fixes
+                try:
+                    # Remove comments
+                    fixed = re.sub(r'//.*?\n', '\n', inner)
+                    fixed = re.sub(r'/\*.*?\*/', '', fixed, flags=re.DOTALL)
+                    # Fix single quotes to double quotes (carefully)
+                    fixed = re.sub(r"'\s*([\w\s]+)\s*'", r'"\1"', fixed)
+                    results.append(json.loads(fixed))
+                except json.JSONDecodeError:
+                    continue
+    return results or None
+
+
+def _normalize_prediction(prediction: str) -> str | None:
+    """Normalize a prediction string to one of the allowed categories."""
+    if not prediction:
+        return None
+    
+    pred_lower = prediction.lower().strip()
+    
+    # Remove common prefixes/suffixes
+    pred_clean = re.sub(r'^(the\s+|a\s+|an\s+|is\s+|it\s+|this\s+|that\s+)', '', pred_lower)
+    pred_clean = re.sub(r'\s+(answer|classification|category|result|grade)$', '', pred_clean)
+    
+    # Check for exact matches first
+    allowed_categories = ["correct", "incorrect", "partial", "almost"]
+    if pred_clean in allowed_categories:
+        return pred_clean.capitalize()
+    
+    # Check for compound patterns first (before single word patterns)
+    # These are phrases that indicate "Almost" category
+    almost_compound_patterns = [
+        r'\balmost\s+correct\b', r'\bnearly\s+correct\b', r'\balmost\s+perfect\b',
+        r'\bclose\s+to\s+correct\b', r'\bessentially\s+correct\b',
+        r'\bmostly\s+correct\b', r'\bcorrect\s+except\s+for\b',
+        r'\bwould\s+be\s+correct\b', r'\balmost\s+complete\b',
+        r'\bnearly\s+complete\b', r'\bessentially\s+complete\b',
+        r'\bmostly\s+complete\b', r'\bpractically\s+correct\b',
+        r'\bpractically\s+complete\b', r'\bvirtually\s+correct\b',
+        r'\bvirtually\s+complete\b', r'\bwould\s+be\s+perfect\b',
+        r'\bwould\s+be\s+complete\b', r'\bcould\s+be\s+correct\b',
+        r'\bcorrect\s+except\s+for\s+(?:a\s+)?(?:minor|small|tiny)\b',
+        r'\bcomplete\s+except\s+for\s+(?:a\s+)?(?:minor|small|tiny)\b',
+        r'\bminor\s+mistake\b', r'\bminor\s+error\b', r'\bsmall\s+mistake\b',
+        r'\bsmall\s+error\b', r'\btiny\s+mistake\b', r'\btiny\s+error\b',
+        r'\bminor\s+gap\b', r'\bsmall\s+gap\b', r'\bnot\s+completed\b',
+        r'\bnot\s+complete\b', r'\balmost\s+there\b', r'\bvery\s+close\b',
+        r'\bjust\s+needs?\b', r'\bonly\s+needs?\b', r'\bsimple\s+fix\b',
+        r'\btrivial\s+fix\b', r'\bminor\s+fix\b', r'\bsmall\s+fix\b',
+        r'\boff\s+by\s+(?:one|1|a\s+sign)\b', r'\bsign\s+error\b',
+        r'\barithmetic\s+error\b', r'\bcalculation\s+error\b',
+        r'\btypo\b', r'\bforgot\s+to\s+check\b', r'\bmissed\s+(?:the|a)\s+case\b',
+        r'\bminor\s+issue\b', r'\bsmall\s+issue\b', r'\btiny\s+issue\b',
+        r'\bminor\s+flaw\b', r'\bsmall\s+flaw\b', r'\btiny\s+flaw\b',
+        r'\bminor\s+oversight\b', r'\bsmall\s+oversight\b',
+        r'\bminor\s+omission\b', r'\bsmall\s+omission\b',
+        r'\bnot\s+negligible\b', r'\bnot\s+complete\b',
+        r'\bonly\s+(?:a\s+)?(?:one|single|1)\s+(?:minor|small|tiny)\b',
+        r'\bjust\s+(?:a\s+)?(?:one|single|1)\s+(?:minor|small|tiny)\b',
+        r'\b(?:one|single|1)\s+(?:minor|small|tiny)\s+(?:error|mistake|issue|typo)\b',
+        r'\b(?:minor|small|tiny)\s+(?:error|mistake|issue|typo)\s+(?:only|just)\b',
+        r'\b(?:arithmetic|calculation|computation|sign)\s+(?:error|mistake)\b',
+        r'\b(?:error|mistake|issue)\s+(?:is|was)\s+(?:minor|small|tiny)\b',
+        r'\b(?:essentially|practically|virtually)\s+(?:correct|right|valid)\b',
+        r'\b(?:almost|nearly)\s+(?:got|had)\s+(?:it|the\s+solution|the\s+proof)\b',
+        r'\b(?:would|could)\s+be\s+(?:correct|perfect|complete)\s+(?:if|with|except)\b',
+        r'\b(?:valid|correct|good)\s+(?:proof|solution|argument)\s+(?:except|apart\s+from)\b',
+        r'\b(?:proof|solution|argument)\s+(?:is|was)\s+(?:valid|correct|good)\s+(?:except|apart\s+from)\b',
+        r'\b(?:calculation|computation)\s+(?:is|was)\s+(?:slightly|a\s+bit)\s+(?:off|wrong)\b',
+        r'\b(?:just|only)\s+(?:a|one)\s+(?:minor|small|tiny)\s+(?:detail|thing)\s+(?:missing|wrong)\b',
+        r'\b(?:solution|proof)\s+(?:is|was)\s+(?:almost|nearly)\s+(?:complete|perfect|correct)\b',
+        r'\b(?:one|a)\s+(?:minor|small|tiny)\s+(?:issue|problem|concern)\b',
+        r'\b(?:almost|nearly)\s+there\b',
+        r'\bvery\s+close\s+to\s+(?:correct|complete|perfect)\b',
+        r'\b(?:just|only)\s+(?:a|one)\s+(?:small|minor|tiny)\s+(?:step|part|piece)\s+(?:missing|wrong)\b',
+    ]
+    for pattern in almost_compound_patterns:
+        if re.search(pattern, pred_lower, re.IGNORECASE):
+            return "Almost"
+    
+    # Check for Partial compound patterns
+    partial_compound_patterns = [
+        r'\bpartially\s+correct\b', r'\bpartial\s+solution\b',
+        r'\bpartial\s+proof\b', r'\bpartial\s+answer\b',
+        r'\bpartial\s+result\b', r'\bincomplete\s+solution\b',
+        r'\bincomplete\s+proof\b', r'\bincomplete\s+answer\b',
+        r'\bpart\s+of\s+the\b', r'\bsome\s+progress\b',
+        r'\bon\s+the\s+right\s+track\b', r'\bgood\s+start\b',
+        r'\bcorrect\s+approach\b', r'\bcorrect\s+method\b',
+        r'\bstarted\s+correctly\b', r'\bpartial\s+understanding\b',
+        r'\bsignificant\s+progress\b', r'\bsubstantial\s+progress\b',
+        r'\bpartially\s+complete\b', r'\bpartially\s+done\b',
+        r'\bpartially\s+proved\b', r'\bpartially\s+shown\b',
+        r'\bpartially\s+valid\b', r'\bpartially\s+right\b',
+        r'\bpartial\s+work\b', r'\bpartial\s+attempt\b',
+        r'\bpartial\s+result\b', r'\bpartial\s+success\b',
+        r'\bpartial\s+completion\b', r'\bpartial\s+achievement\b',
+    ]
+    for pattern in partial_compound_patterns:
+        if re.search(pattern, pred_lower, re.IGNORECASE):
+            return "Partial"
+    
+    # Check for Incorrect compound patterns
+    incorrect_compound_patterns = [
+        r'\bwrong\s+method\b', r'\bwrong\s+approach\b',
+        r'\bincorrect\s+method\b', r'\bincorrect\s+approach\b',
+        r'\bnot\s+correct\b', r'\bnot\s+right\b',
+        r'\bnot\s+valid\b', r'\bnot\s+true\b',
+        r'\bno\s+understanding\b', r'\bno\s+valid\b',
+        r'\bcircular\s+reasoning\b', r'\bverification\s+by\s+example\b',
+        r'\bwrong\s+idea\b', r'\bwrong\s+strategy\b',
+        r'\bincorrect\s+idea\b', r'\bincorrect\s+strategy\b',
+        r'\bcompletely\s+wrong\b', r'\bentirely\s+wrong\b',
+        r'\btotally\s+wrong\b', r'\babsolutely\s+wrong\b',
+        r'\bfundamentally\s+wrong\b', r'\bfundamentally\s+incorrect\b',
+        r'\bcompletely\s+incorrect\b', r'\bentirely\s+incorrect\b',
+    ]
+    for pattern in incorrect_compound_patterns:
+        if re.search(pattern, pred_lower, re.IGNORECASE):
+            return "Incorrect"
+    
+    # Check for Correct compound patterns
+    correct_compound_patterns = [
+        r'\bcompletely\s+correct\b', r'\bentirely\s+correct\b',
+        r'\btotally\s+correct\b', r'\babsolutely\s+correct\b',
+        r'\bperfectly\s+correct\b', r'\bfully\s+correct\b',
+        r'\b100%\s+correct\b', r'\ball\s+correct\b',
+        r'\bcompletely\s+right\b', r'\bentirely\s+right\b',
+        r'\btotally\s+right\b', r'\babsolutely\s+right\b',
+        r'\bperfectly\s+right\b', r'\bfully\s+right\b',
+        r'\b100%\s+right\b', r'\ball\s+right\b',
+        r'\bcompletely\s+valid\b', r'\bentirely\s+valid\b',
+        r'\btotally\s+valid\b', r'\babsolutely\s+valid\b',
+        r'\bperfectly\s+valid\b', r'\bfully\s+valid\b',
+        r'\b100%\s+valid\b', r'\ball\s+valid\b',
+        r'\bcompletely\s+true\b', r'\bentirely\s+true\b',
+        r'\btotally\s+true\b', r'\babsolutely\s+true\b',
+        r'\bperfectly\s+true\b', r'\bfully\s+true\b',
+        r'\b100%\s+true\b', r'\ball\s+true\b',
+    ]
+    for pattern in correct_compound_patterns:
+        if re.search(pattern, pred_lower, re.IGNORECASE):
+            return "Correct"
+    
+    # Check single word patterns - order matters!
+    # Check Almost patterns first (high priority)
+    if re.search(r'\balmost\b', pred_lower):
+        return "Almost"
+    if re.search(r'\bnearly\b', pred_lower):
+        return "Almost"
+    if re.search(r'\bclose\b', pred_lower):
+        return "Almost"
+    
+    # Check Incorrect patterns (high priority to catch errors)
+    if re.search(r'\bwrong\b', pred_lower):
+        return "Incorrect"
+    if re.search(r'\bfalse\b', pred_lower):
+        return "Incorrect"
+    if re.search(r'\binvalid\b', pred_lower):
+        return "Incorrect"
+    if re.search(r'\bnot\s+correct\b', pred_lower):
+        return "Incorrect"
+    if re.search(r'\berroneous\b', pred_lower):
+        return "Incorrect"
+    
+    # Check Partial patterns
+    if re.search(r'\bpartial\b', pred_lower):
+        return "Partial"
+    if re.search(r'\bincomplete\b', pred_lower):
+        return "Partial"
+    if re.search(r'\bpartly\b', pred_lower):
+        return "Partial"
+    
+    # Check Correct patterns last (least specific)
+    if re.search(r'\bcorrect\b', pred_lower):
+        return "Correct"
+    if re.search(r'\bright\b', pred_lower):
+        return "Correct"
+    if re.search(r'\bvalid\b', pred_lower):
+        return "Correct"
+    if re.search(r'\btrue\b', pred_lower):
+        return "Correct"
+    if re.search(r'\bperfect\b', pred_lower):
+        return "Correct"
+    if re.search(r'\bcomplete\b', pred_lower):
+        return "Correct"
+    if re.search(r'\baccurate\b', pred_lower):
+        return "Correct"
+    
+    return None
+
+
+def _extract_response_flexible(text: str) -> str | None:
+    """Extract the classification from model response using multiple strategies."""
+    if not text:
+        return None
+    
+    text_lower = text.lower()
+    text_upper = text.upper()
+    
+    # Strategy 1: Look for explicit classification statements with high confidence
+    # Check "Almost" first as it's the most commonly missed
+    explicit_patterns = [
+        # Direct classification statements - Almost (expanded patterns)
+        (r'\bclassification\s*[:=]\s*["\']?almost["\']?\b', "Almost"),
+        (r'\bgrade\s*[:=]\s*["\']?almost["\']?\b', "Almost"),
+        (r'\bcategory\s*[:=]\s*["\']?almost["\']?\b', "Almost"),
+        (r'\bclassify\s+(?:this|it)\s+as\s+["\']?almost["\']?\b', "Almost"),
+        (r'\bis\s+["\']?almost["\']?\b', "Almost"),
+        (r'\bthis\s+is\s+["\']?almost["\']?\b', "Almost"),
+        (r'\bthe\s+answer\s+is\s+["\']?almost["\']?\b', "Almost"),
+        (r'\bresponse["\']?\s*[:=]\s*["\']?\s*almost["\']?\b', "Almost"),
+        (r'\bshould\s+be\s+["\']?almost["\']?\b', "Almost"),
+        (r'\bwould\s+be\s+["\']?almost["\']?\b', "Almost"),
+        (r'\bevaluation\s*[:=]\s*["\']?almost["\']?\b', "Almost"),
+        (r'\bverdict\s*[:=]\s*["\']?almost["\']?\b', "Almost"),
+        (r'\bresult\s*[:=]\s*["\']?almost["\']?\b', "Almost"),
+        (r'\bprediction\s*[:=]\s*["\']?almost["\']?\b', "Almost"),
+        # Additional Almost patterns
+        (r'\bclassification[:\s]+almost\b', "Almost"),
+        (r'\bgrade[:\s]+almost\b', "Almost"),
+        (r'\bcategory[:\s]+almost\b', "Almost"),
+        (r'["\']response["\']\s*:\s*["\']almost["\']', "Almost"),
+        (r'\{\s*["\']?response["\']?\s*:\s*["\']?almost["\']?\s*\}', "Almost"),
+        (r'\bjson\s*[:=]\s*["\']?almost["\']?\b', "Almost"),
+        
+        # Direct classification statements - Partial
+        (r'\bclassification\s*[:=]\s*["\']?partial["\']?\b', "Partial"),
+        (r'\bgrade\s*[:=]\s*["\']?partial["\']?\b', "Partial"),
+        (r'\bcategory\s*[:=]\s*["\']?partial["\']?\b', "Partial"),
+        (r'\bclassify\s+(?:this|it)\s+as\s+["\']?partial["\']?\b', "Partial"),
+        (r'\bresponse["\']?\s*[:=]\s*["\']?\s*partial["\']?\b', "Partial"),
+        (r'\bevaluation\s*[:=]\s*["\']?partial["\']?\b', "Partial"),
+        (r'\bverdict\s*[:=]\s*["\']?partial["\']?\b', "Partial"),
+        (r'\bresult\s*[:=]\s*["\']?partial["\']?\b', "Partial"),
+        (r'\bprediction\s*[:=]\s*["\']?partial["\']?\b', "Partial"),
+        
+        # Direct classification statements - Incorrect
+        (r'\bclassification\s*[:=]\s*["\']?incorrect["\']?\b', "Incorrect"),
+        (r'\bgrade\s*[:=]\s*["\']?incorrect["\']?\b', "Incorrect"),
+        (r'\bcategory\s*[:=]\s*["\']?incorrect["\']?\b', "Incorrect"),
+        (r'\bresponse["\']?\s*[:=]\s*["\']?\s*incorrect["\']?\b', "Incorrect"),
+        (r'\bevaluation\s*[:=]\s*["\']?incorrect["\']?\b', "Incorrect"),
+        (r'\bverdict\s*[:=]\s*["\']?incorrect["\']?\b', "Incorrect"),
+        (r'\bresult\s*[:=]\s*["\']?incorrect["\']?\b', "Incorrect"),
+        (r'\bprediction\s*[:=]\s*["\']?incorrect["\']?\b', "Incorrect"),
+        
+        # Direct classification statements - Correct
+        (r'\bclassification\s*[:=]\s*["\']?correct["\']?\b', "Correct"),
+        (r'\bgrade\s*[:=]\s*["\']?correct["\']?\b', "Correct"),
+        (r'\bcategory\s*[:=]\s*["\']?correct["\']?\b', "Correct"),
+        (r'\bresponse["\']?\s*[:=]\s*["\']?\s*correct["\']?\b', "Correct"),
+        (r'\bevaluation\s*[:=]\s*["\']?correct["\']?\b', "Correct"),
+        (r'\bverdict\s*[:=]\s*["\']?correct["\']?\b', "Correct"),
+        (r'\bresult\s*[:=]\s*["\']?correct["\']?\b', "Correct"),
+        (r'\bprediction\s*[:=]\s*["\']?correct["\']?\b', "Correct"),
+    ]
+    
+    for pattern, category in explicit_patterns:
+        if re.search(pattern, text_lower, re.IGNORECASE):
+            return category
+    
+    # Strategy 2: Try JSON extraction from <json> tags
+    json_results = _extract_jsons(text)
+    if json_results:
+        for result in json_results:
+            if isinstance(result, dict):
+                for key in ["response", "classification", "answer", "result", "grade", "evaluation", "verdict", "category", "points", "score"]:
+                    if key in result:
+                        val = result[key]
+                        if isinstance(val, str):
+                            normalized = _normalize_prediction(val.strip())
+                            if normalized:
+                                return normalized
+                        elif isinstance(val, bool):
+                            return "Correct" if val else "Incorrect"
+                        elif isinstance(val, (int, float)):
+                            # Handle numeric grades
+                            if val == 7:
+                                return "Correct"
+                            elif val == 6:
+                                return "Almost"
+                            elif 1 <= val <= 3:
+                                return "Partial"
+                            elif val == 0:
+                                return "Incorrect"
+    
+    # Strategy 3: Try to find JSON in markdown code blocks
+    markdown_pattern = r'```(?:json)?\s*\n?(\{[\s\S]*?\})\n?```'
+    for match in re.finditer(markdown_pattern, text, re.DOTALL):
+        try:
+            json_obj = json.loads(match.group(1))
+            if isinstance(json_obj, dict):
+                for key in ["response", "classification", "answer", "result", "grade", "evaluation", "verdict", "category", "points", "score"]:
+                    if key in json_obj:
+                        val = json_obj[key]
+                        if isinstance(val, str):
+                            normalized = _normalize_prediction(val.strip())
+                            if normalized:
+                                return normalized
+                        elif isinstance(val, bool):
+                            return "Correct" if val else "Incorrect"
+                        elif isinstance(val, (int, float)):
+                            if val == 7:
+                                return "Correct"
+                            elif val == 6:
+                                return "Almost"
+                            elif 1 <= val <= 3:
+                                return "Partial"
+                            elif val == 0:
+                                return "Incorrect"
+        except json.JSONDecodeError:
+            # Try to fix common JSON issues in markdown
+            try:
+                fixed = re.sub(r',(\s*[}\]])', r'\1', match.group(1))
+                json_obj = json.loads(fixed)
+                if isinstance(json_obj, dict):
+                    for key in ["response", "classification", "answer", "result", "grade", "evaluation", "verdict", "category", "points", "score"]:
+                        if key in json_obj:
+                            val = json_obj[key]
+                            if isinstance(val, str):
+                                normalized = _normalize_prediction(val.strip())
+                                if normalized:
+                                    return normalized
+                            elif isinstance(val, bool):
+                                return "Correct" if val else "Incorrect"
+                            elif isinstance(val, (int, float)):
+                                if val == 7:
+                                    return "Correct"
+                                elif val == 6:
+                                    return "Almost"
+                                elif 1 <= val <= 3:
+                                    return "Partial"
+                                elif val == 0:
+                                    return "Incorrect"
+            except json.JSONDecodeError:
+                continue
+    
+    # Strategy 4: Look for raw JSON objects without tags or markdown
+    # This catches cases where the model outputs {"response": "Almost"} without formatting
+    raw_json_pattern = r'\{\s*["\']?response["\']?\s*:\s*["\']?(\w+)["\']?\s*\}'
+    for match in re.finditer(raw_json_pattern, text, re.IGNORECASE):
+        val = match.group(1)
+        normalized = _normalize_prediction(val.strip())
+        if normalized:
+            return normalized
+    
+    # Also try to find any JSON-like structure with classification keys
+    loose_json_pattern = r'["\']?(?:response|classification|grade|category)["\']?\s*[:=]\s*["\']?(\w+)["\']?'
+    for match in re.finditer(loose_json_pattern, text, re.IGNORECASE):
+        val = match.group(1)
+        normalized = _normalize_prediction(val.strip())
+        if normalized:
+            return normalized
+    
+    # Strategy 4b: Look for JSON with "result" or "prediction" keys
+    result_json_pattern = r'["\']?(?:result|prediction|answer|output)["\']?\s*[:=]\s*["\']?(\w+)["\']?'
+    for match in re.finditer(result_json_pattern, text, re.IGNORECASE):
+        val = match.group(1)
+        normalized = _normalize_prediction(val.strip())
+        if normalized:
+            return normalized
+    
+    # Strategy 4c: Look for any word that looks like a category in JSON-like context
+    json_context_pattern = r'\{[^}]*["\']?(?:response|classification|grade|category|result|prediction)["\']?\s*[:=]\s*["\']?(Correct|Almost|Partial|Incorrect)["\']?[^}]*\}'
+    for match in re.finditer(json_context_pattern, text, re.IGNORECASE):
+        val = match.group(1)
+        normalized = _normalize_prediction(val.strip())
+        if normalized:
+            return normalized
+    
+    # Strategy 5: Look for standalone category mentions at end of text or emphasized
+    # Check Almost first (most commonly missed)
+    almost_standalone = [
+        r'(?:^|\n)\s*["\']?almost["\']?\s*[.!?]?\s*(?:$|\n)',
+        r'\*\*almost\*\*',
+        r'\balmost\b[.!?]?\s*$',
+        r'^\s*almost\s*$',
+        r'"almost"',
+        r"'almost'",
+        r'#\s*almost\b',
+        r'\(almost\)',
+        r'\[almost\]',
+        r'\balmost\s+(?:perfect|complete|correct)\b',
+        r'\b(?:nearly|practically|virtually)\s+(?:perfect|complete|correct)\b',
+        r'\b(?:just|only)\s+(?:a|one)\s+(?:minor|small|tiny)\b',
+        r'\bminor\s+(?:error|mistake|issue|flaw)\b',
+        r'\bsmall\s+(?:error|mistake|issue|gap)\b',
+        r'\btiny\s+(?:error|mistake|issue)\b',
+        r'\bsign\s+error\b',
+        r'\barithmetic\s+error\b',
+        r'\bcalculation\s+error\b',
+        r'\btypo\b',
+        r'\bcorrect\s+except\s+for\b',
+        r'\bwould\s+be\s+(?:correct|perfect)\s+if\b',
+        r'\b(?:one|single|1)\s+(?:minor|small|tiny)\s+(?:error|mistake|issue|typo)\b',
+        r'\b(?:minor|small|tiny)\s+(?:error|mistake|issue|typo)\s+(?:only|just)\b',
+        r'\b(?:error|mistake|issue|typo)\s+(?:is|was)\s+(?:minor|small|tiny)\b',
+        r'\b(?:only|just)\s+(?:a|one)\s+(?:minor|small|tiny|little)\s+(?:error|mistake|issue|typo|problem)\b',
+        r'\b(?:minor|small|tiny)\s+(?:error|mistake|issue|typo)\s+in\b',
+        r'\b(?:one|a)\s+(?:minor|small|tiny)\s+(?:error|mistake|issue|typo)\b',
+        r'\b(?:error|mistake|issue|typo)\s+(?:at|in)\s+(?:the|one)\s+(?:end|step|point)\b',
+        r'\b(?:otherwise|apart\s+from|except\s+for)\s+(?:a|one|this|that)\s+(?:minor|small|tiny)\b',
+        r'\b(?:valid|correct|good|sound)\s+(?:proof|solution|argument)\s+(?:except|apart\s+from|save)\b',
+        r'\b(?:proof|solution|argument)\s+(?:is|was)\s+(?:valid|correct|good|sound)\s+(?:except|apart\s+from)\b',
+        r'\b(?:minor|small|tiny)\s+(?:inaccuracy|inconsistency)\b',
+        r'\b(?:calculation|computation)\s+(?:is|was)\s+(?:slightly|a\s+bit)\s+(?:off|wrong|incorrect)\b',
+        r'\b(?:just|only)\s+(?:a|one)\s+(?:minor|small|tiny)\s+(?:detail|thing)\s+(?:missing|wrong)\b',
+        r'\b(?:solution|proof)\s+(?:is|was)\s+(?:almost|nearly)\s+(?:complete|perfect|correct)\b',
+        r'\b(?:one|a)\s+(?:minor|small|tiny)\s+(?:issue|problem|concern)\b',
+        r'\b(?:minor|small|tiny)\s+(?:issue|problem|concern)\s+(?:with|in)\b',
+        r'\b(?:just|only)\s+(?:one|a)\s+(?:minor|small|tiny)\s+(?:issue|problem|concern)\b',
+        r'\b(?:almost|nearly)\s+there\b',
+        r'\bvery\s+close\s+to\s+(?:correct|complete|perfect)\b',
+        r'\b(?:just|only)\s+(?:a|one)\s+(?:small|minor|tiny)\s+(?:fix|correction)\b',
+        r'\b(?:small|minor|tiny)\s+(?:fix|correction)\s+(?:needed|required)\b',
+        r'\b(?:would|could)\s+be\s+(?:correct|perfect|complete)\s+with\s+(?:a|one)\s+(?:small|minor|tiny)\b',
+        r'\b(?:correct|perfect|complete)\s+except\s+for\s+(?:a|one)\s+(?:small|minor|tiny)\b',
+    ]
+    for pattern in almost_standalone:
+        if re.search(pattern, text_lower, re.IGNORECASE | re.MULTILINE):
+            return "Almost"
+    
+    # Then other categories
+    standalone_patterns = [
+        (r'(?:^|\n)\s*["\']?partial["\']?\s*[.!?]?\s*(?:$|\n)', "Partial"),
+        (r'(?:^|\n)\s*["\']?incorrect["\']?\s*[.!?]?\s*(?:$|\n)', "Incorrect"),
+        (r'(?:^|\n)\s*["\']?correct["\']?\s*[.!?]?\s*(?:$|\n)', "Correct"),
+        (r'\*\*partial\*\*', "Partial"),
+        (r'\*\*incorrect\*\*', "Incorrect"),
+        (r'\*\*correct\*\*', "Correct"),
+        (r'^\s*partial\s*$', "Partial"),
+        (r'^\s*incorrect\s*$', "Incorrect"),
+        (r'^\s*correct\s*$', "Correct"),
+        (r'"partial"', "Partial"),
+        (r'"incorrect"', "Incorrect"),
+        (r'"correct"', "Correct"),
+        (r"'partial'", "Partial"),
+        (r"'incorrect'", "Incorrect"),
+        (r"'correct'", "Correct"),
+    ]
+    for pattern, category in standalone_patterns:
+        if re.search(pattern, text_lower, re.IGNORECASE | re.MULTILINE):
+            return category
+    
+    # Strategy 5: Look for direct category mentions with word boundaries
+    # Check Almost first (most commonly missed)
+    if re.search(r'\bALMOST\b', text_upper):
+        return "Almost"
+    
+    # Then other categories in order
+    for category in ["Partial", "Incorrect", "Correct"]:
+        if re.search(rf'\b{category.upper()}\b', text_upper):
+            return category
+    
+    return None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem."""
+        # Extract fields from inputs
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+        points = inputs.get("points", None)
+        
+        # Get points value for prompt enhancement
+        points_val = None
+        if points is not None:
+            try:
+                points_val = int(points) if isinstance(points, str) else points
+            except (ValueError, TypeError):
+                points_val = None
+        
+        # Add points hint to prompt if available - MAKE THIS VERY EXPLICIT
+        points_hint = ""
+        if points_val is not None:
+            if points_val == 7:
+                points_hint = "\n**CRITICAL HINT - POINTS = 7**: This answer received 7 points, which means it is **CORRECT** (100% perfect). Only classify as 'Correct'.\n"
+            elif points_val == 6:
+                points_hint = "\n**CRITICAL HINT - POINTS = 6**: This answer received 6 points, which means it is **ALMOST** (90-99% complete with 1-2 tiny issues). You MUST classify as 'Almost', NOT 'Correct' or 'Partial'.\n"
+            elif 1 <= points_val <= 3:
+                points_hint = f"\n**CRITICAL HINT - POINTS = {points_val}**: This answer received {points_val} points, which means it is **PARTIAL** (30-70% complete, on the right track but major gaps). You MUST classify as 'Partial', NOT 'Almost' or 'Incorrect'.\n"
+            elif points_val == 0:
+                points_hint = "\n**CRITICAL HINT - POINTS = 0**: This answer received 0 points, which means it is **INCORRECT** (wrong method or no understanding). You MUST classify as 'Incorrect', NOT 'Partial'.\n"
+        
+        instruction = f"""You are an expert mathematics grader for International Mathematical Olympiad (IMO) problems. Your task is to evaluate the student's answer and classify it into exactly one of four categories.
+
+## POINTS TO CLASSIFICATION MAPPING (FOLLOW THIS EXACTLY):
+- **7 points** → **Correct** (100% perfect)
+- **6 points** → **Almost** (90-99% complete, 1-2 tiny issues)
+- **1-3 points** → **Partial** (30-70% complete, significant gaps)
+- **0 points** → **Incorrect** (wrong method or no understanding)
+
+## The Four Categories (CHOOSE EXACTLY ONE):
+
+1. **Correct** (7 points): The solution is 100% perfect. No errors, no gaps, no issues whatsoever. The proof is complete and rigorous.
+
+2. **Almost** (6 points): The solution is 90-99% complete with only 1-2 TINY issues. Examples: arithmetic error, typo, minor notation issue, one small edge case, sign error. The fix would take less than 30 seconds to explain. The core logic is sound and complete.
+
+3. **Partial** (1-3 points): The solution shows good understanding and correct approach, but has MAJOR gaps or missing components. The student is on the right track but significant work remains. Multiple issues or missing critical steps.
+
+4. **Incorrect** (0 points): The approach is fundamentally wrong, or the student fails to demonstrate understanding of the correct method. Wrong method, circular reasoning, or verification by example.
+
+## CRITICAL DECISION RULES:
+
+**Rule 1 - Use Points as Primary Guide**:
+The points value is the MOST RELIABLE indicator of the correct classification. Use it as your primary guide.
+
+**Rule 2 - Correct vs Almost**: 
+- If there's ANY flaw (even a tiny typo, sign error, or arithmetic mistake) → **Almost**
+- Only if 100% perfect with zero issues → **Correct**
+- **WHEN IN DOUBT, CHOOSE ALMOST OVER CORRECT**
+
+**Rule 3 - Almost vs Partial (MOST IMPORTANT - COMMON ERROR AREA)**:
+This is where most grading errors occur. Be extremely careful here.
+
+**ALMOST (6 points) means:**
+- The solution looks COMPLETE at first glance
+- 1-2 tiny issues that are EASILY fixable (typo, arithmetic error, one missing edge case, sign error)
+- Core proof structure is 100% intact
+- The fix takes less than 30 seconds to explain
+- Key test: "Would this solution be competition-ready with a quick fix?" 
+  - YES → **Almost**
+
+**PARTIAL (1-3 points) means:**
+- The solution is clearly INCOMPLETE when you read it
+- Major proof components are missing
+- Multiple issues OR any major conceptual gap
+- Fix would require adding substantial proof content
+- Key test: "Does the solution look complete at first glance?"
+  - YES → Almost (or Correct)
+  - NO (clearly missing parts) → **Partial**
+
+**CRITICAL DISTINCTION EXAMPLES:**
+- "Almost complete with minor errors" → **ALMOST** (not Partial!)
+- "Partially correct" → **PARTIAL** (not Almost!)
+- "Complete except for one small error" → **ALMOST**
+- "Incomplete proof with good start" → **PARTIAL**
+- "Solution has a small gap" → **ALMOST** (if the gap is small)
+- "Solution has major gaps" → **PARTIAL**
+
+**Rule 4 - Partial vs Incorrect**:
+- Does student demonstrate understanding of the correct approach/method? 
+  - Yes (right idea, wrong execution or incomplete) → **Partial**
+  - No (completely wrong method, no understanding) → **Incorrect**
+- Key test: "Are they on the right track?" 
+  - Yes → Partial
+  - No → Incorrect
+- **BE STRICT**: If the student uses a fundamentally wrong method, it's Incorrect even if they wrote a lot
+
+**Rule 5 - Points Guide (USE THIS!)**:
+The grading guidelines often mention point values. Use these as your primary guide:
+- 7 points → **Correct**
+- 6 points → **Almost**  
+- 1-3 points → **Partial**
+- 0 points → **Incorrect**
+
+If the guidelines say "(Partial)" for a specific observation, that means the solution gets 1-3 points (Partial), NOT that it has partial credit in a general sense.
+
+## Problem:
+```
+{problem}
+```
+
+## Official Solution:
+```
+{solution}
+```
+
+## Grading Guidelines:
+```
+{grading_guidelines}
+```
+{points_hint}
+## Student Answer:
+```
+{student_answer}
+```
+
+## DETAILED EXAMPLES WITH EXPLANATIONS:
+
+### Example 1 - Correct (7 points, perfect solution):
+**Student work:** Complete proof of the AM-GM inequality using induction. All steps correct, base case verified, inductive step rigorous, conclusion properly stated.
+**Classification:** **Correct**
+**Why:** 100% perfect. No errors, no gaps, no issues.
+
+### Example 2 - Almost (6 points, one tiny error):
+**Student work:** Complete proof of the AM-GM inequality using induction. Base case correct, inductive step correct, but in the final conclusion wrote "2+2=5" instead of "2+2=4".
+**Classification:** **Almost**
+**Why:** One tiny arithmetic error in an otherwise perfect proof. The fix takes 2 seconds. Core logic is completely sound.
+
+### Example 3 - Almost (6 points, one missing edge case):
+**Student work:** Proved that n² > 2n for all n ≥ 3 using induction. Proof is complete and correct for n ≥ 3, but forgot to check n=1 and n=2.
+**Classification:** **Almost**
+**Why:** One small edge case missing. The main proof is complete and correct. Just need to add "for n ≥ 3" or check the small cases.
+
+### Example 4 - Almost (6 points, sign error):
+**Student work:** Complete derivation of the quadratic formula. All steps correct except wrote "-b ± √(b²-4ac)" instead of "-b ± √(b²-4ac)" (sign error in the formula).
+**Classification:** **Almost**
+**Why:** One sign error in an otherwise perfect derivation. Easy to fix, core logic is sound.
+
+### Example 4b - Almost (6 points, minor typo in notation):
+**Student work:** Complete proof of a number theory problem. All logic correct, but used "k" instead of "n" in one equation, and wrote "for all integers" instead of "for all positive integers".
+**Classification:** **Almost**
+**Why:** Minor notation issues that don't affect the mathematical validity. The proof is essentially complete.
+
+### Example 4c - Almost (6 points, calculation error that doesn't affect conclusion):
+**Student work:** Complete proof with one arithmetic mistake in the middle (wrote 3×4=11 instead of 12), but the final conclusion is still correct and the proof structure is intact.
+**Classification:** **Almost**
+**Why:** One calculation error that doesn't invalidate the proof. The core argument is sound.
+
+### Example 5 - Partial (2 points, incomplete proof):
+**Student work:** Started proving the AM-GM inequality by setting up the base case n=1 correctly. Stated the inductive hypothesis but didn't complete the inductive step. Ended with "and so by induction, the result follows."
+**Classification:** **Partial**
+**Why:** Good start with correct approach, but the inductive step is completely missing. Major gap in the proof structure. Student is on the right track but significant work remains.
+
+### Example 6 - Partial (3 points, missing key lemma):
+**Student work:** Proved that if n is prime, then certain properties hold. Identified the correct approach and proved the main direction, but didn't prove the converse (that those properties imply n is prime).
+**Classification:** **Partial**
+**Why:** Correct approach, good understanding shown, but missing a critical component (the converse). The proof is incomplete.
+
+### Example 7 - Partial (1 point, some progress):
+**Student work:** For a geometry problem, correctly drew the diagram and identified some angle relationships, but couldn't complete the proof. Made some correct observations but no complete argument.
+**Classification:** **Partial**
+**Why:** Shows some understanding and made progress, but no complete proof structure. On the right track but far from complete.
+
+### Example 8 - Incorrect (0 points, wrong method):
+**Student work:** "I checked n=1,2,3,4,5 and the formula holds in each case, so it must be true for all n."
+**Classification:** **Incorrect**
+**Why:** Verification by example is not a proof. The student doesn't understand what constitutes a valid mathematical proof.
+
+### Example 9 - Incorrect (0 points, circular reasoning):
+**Student work:** "To prove A, we use B. To prove B, we use C. To prove C, we use A. Therefore A is true."
+**Classification:** **Incorrect**
+**Why:** Circular reasoning. The proof assumes what it needs to prove. No valid mathematical reasoning.
+
+### Example 10 - Incorrect (0 points, no understanding):
+**Student work:** Random algebraic manipulations that don't lead anywhere. No clear approach, no understanding of the problem demonstrated.
+**Classification:** **Incorrect**
+**Why:** No valid mathematical reasoning. The student doesn't understand the problem or how to approach it.
+
+### Example 11 - Incorrect (0 points, despite some observations):
+**Grading Guidelines:** (Partial) 1. Observed that when an arc with scores smaller than 1 to some person X is deleted, the problem condition still holds for X. (Almost) 1. Found a perfect matching and uses induction, but didn't explain why the induction works.
+**Student work:** [Long response with observations about the problem setup, some algebraic manipulations, but ultimately no valid proof structure or correct approach to solving the problem.]
+**Classification:** **Incorrect**
+**Why:** The grading guidelines show what WOULD earn Partial or Almost credit, but this student's answer doesn't actually achieve those things. The (Partial) and (Almost) in the guidelines are thresholds, not descriptions of this student's work. This student got 0 points because they didn't actually complete the observations correctly or demonstrate valid proof structure.
+
+### Example 12 - Partial (2 points, incomplete but on track):
+**Grading Guidelines:** (Partial) 1. Considered a prime p|xy+1. (Almost) 1. Solution is almost complete, but made minor mistakes which are not negligible.
+**Student work:** Started analyzing the sequence correctly, considered the case x=y and found (1,1) is a solution. For x≠y, began analyzing the gcd structure and made some correct observations about the sequence behavior, but the proof is incomplete and several cases are not fully resolved.
+**Classification:** **Partial**
+**Why:** The student is on the right track with correct approach and made significant progress (1-3 points worth). The grading guidelines show what earns credit, and this student achieved the Partial threshold but not the Almost threshold.
+
+### Example 13 - Almost (6 points, minor mistake not negligible):
+**Grading Guidelines:** (Almost) 1. Solution is almost complete, but made minor mistakes which are not negligible.
+**Student work:** Complete solution with one small arithmetic error in the middle of the proof, but the error doesn't affect the final conclusion. The proof structure is intact.
+**Classification:** **Almost**
+**Why:** The grading guidelines explicitly say "minor mistakes which are not negligible" - this is the definition of Almost. The solution is nearly complete with only small errors.
+
+### Example 14 - Partial (2 points, incomplete with gaps):
+**Grading Guidelines:** (Partial) 1. Proved that f is injective. (Partial) 2. Proved that f is surjective. (Almost) 1. Solution is complete except for a small gap in the surjectivity proof.
+**Student work:** Successfully proved that the function is injective with a valid argument. Started the surjectivity proof but didn't complete it. Made some progress on both parts but neither is fully resolved.
+**Classification:** **Partial**
+**Why:** The student achieved the Partial thresholds (proved injectivity, attempted surjectivity) but did not reach the Almost threshold (complete solution with only a small gap).
+
+### Example 15 - ALMOST vs PARTIAL distinction (CRITICAL):
+**Grading Guidelines:** (Partial) 1. Proved that the sequence is bounded. (Almost) 1. Solution is complete except for a small gap in proving the limit exists.
+**Student work A:** Complete proof that the sequence is bounded, with rigorous argument. Then stated "therefore the sequence converges" without proving the limit exists.
+**Classification A:** **ALMOST** - The solution is essentially complete. Only one small gap (proving limit exists). The main work (boundedness) is done correctly.
+
+**Student work B:** Started the proof by considering the sequence definition, made some observations about monotonicity, but didn't complete either the boundedness proof or the limit proof.
+**Classification B:** **PARTIAL** - The solution has major gaps. Neither the boundedness nor the limit is properly addressed.
+
+### Example 16 - Another ALMOST vs PARTIAL distinction:
+**Grading Guidelines:** (Partial) 1. Found the correct substitution. (Almost) 1. Complete solution with one calculation error.
+**Student work A:** Complete solution using the correct substitution, all steps shown, final answer is correct except for a sign error in the last step.
+**Classification A:** **ALMOST** - Complete solution with one tiny error. The fix is trivial.
+
+**Student work B:** Found the correct substitution and started applying it, but only completed 2 out of 5 steps needed for the full solution.
+**Classification B:** **PARTIAL** - Good start but incomplete. Major work remains.
+
+## CRITICAL DISTINCTION - ALMOST vs PARTIAL:
+
+The most common error is confusing "Almost" with "Partial". Here's how to tell them apart:
+
+**ALMOST = 90-99% complete with 1-2 TINY fixable issues**
+- The solution looks COMPLETE at first glance
+- Core logic is sound and complete
+- Issues are: typos, arithmetic errors, one missing edge case, sign errors
+- Fix would take less than 30 seconds to explain
+- The student clearly knows how to solve the problem
+- **Key phrase in guidelines**: "minor mistakes which are not negligible", "almost complete", "complete except for"
+- **Points**: 6 points
+
+**PARTIAL = Significant work remains, major gaps exist**
+- The solution is clearly INCOMPLETE when you read it
+- Multiple missing steps or major logical gaps
+- Fix would require adding substantial proof content
+- The student is on the right track but hasn't demonstrated full mastery
+- **Key phrase in guidelines**: "incomplete", "did not complete", "partial proof", "found the correct approach but..."
+- **Points**: 1-3 points
+
+**DECISION TREE for Almost vs Partial:**
+1. Does the solution look complete at first glance? 
+   - YES → Could be Almost or Correct
+   - NO → Partial
+2. Are there 1-2 tiny fixable issues OR major gaps?
+   - 1-2 tiny issues → Almost
+   - Major gaps → Partial
+3. What does the grading guideline say about points?
+   - 6 points → Almost
+   - 1-3 points → Partial
+
+**TEST: Would a competition judge award 6 points (Almost) or 1-3 points (Partial)?**
+- 6 points = Almost (minor deduction for tiny error)
+- 1-3 points = Partial (significant credit for good approach but incomplete)
+
+**COMMON MISTAKES TO AVOID:**
+- "Almost complete" → This means ALMOST, not Partial!
+- "Partially correct" → This means PARTIAL, not Almost!
+- "Complete except for..." → This means ALMOST (it's complete!)
+- "Incomplete but good start" → This means PARTIAL (it's incomplete!)
+
+## STEP-BY-STEP EVALUATION PROCESS:
+
+1. **Read the student answer completely**
+2. **Compare to official solution**: What matches? What's different?
+3. **Identify ALL issues** (errors, gaps, typos, missing steps)
+4. **Count and categorize issues**:
+   - Tiny issues: typos, arithmetic errors, sign errors, one missing edge case
+   - Major issues: missing proof steps, logical gaps, incomplete reasoning
+5. **Apply decision rules**:
+   - Any flaw at all? → Not Correct
+   - 1-2 tiny issues only? → Almost
+   - 3+ issues OR major gaps? → Partial
+   - Wrong approach? → Incorrect
+6. **Double-check your classification**:
+   - Did you miss any tiny errors that would make this "Almost" instead of "Correct"?
+   - Are you sure this is "Partial" and not "Almost"? (common error!)
+   - Are you sure this is "Incorrect" and not "Partial"?
+
+## Response Format (REQUIRED):
+You MUST respond with a JSON object in this exact format:
+
+<json>
+{{
+    "response": "Correct" | "Almost" | "Partial" | "Incorrect"
+}}
+</json>
+
+**CRITICAL REMINDERS**:
+- "Almost" means ALMOST PERFECT - 1-2 tiny fixable issues only
+- "Partial" means significant work remains - don't confuse with Almost!
+- When the grading guidelines mention "minor mistake" or "small gap" → use **Almost**
+- When the grading guidelines mention "incomplete" or "didn't complete" → use **Partial**
+- If the student answer has ANY error, even tiny, it CANNOT be "Correct"
+- **BE CONSERVATIVE**: When in doubt between two categories, choose the LOWER one (e.g., Partial over Almost, Incorrect over Partial)
+
+**FINAL CHECKLIST - Before you output your classification:**
+1. **Check the Points Value**: What points does the grading guideline indicate? (7=Correct, 6=Almost, 1-3=Partial, 0=Incorrect)
+2. Did you identify ALL issues in the solution? (errors, gaps, typos, missing steps)
+3. Are the issues tiny (1-2 typos/arithmetic errors) or major (missing proof sections)?
+4. Does the solution look complete at first glance? (Yes → Almost/Correct, No → Partial)
+5. Is the core proof logic sound? (Yes → Almost/Partial, No → Incorrect)
+6. Would a 30-second fix make this competition-ready? (Yes → Almost, No → Partial)
+7. **DOUBLE-CHECK**: Are you sure this isn't "Almost" when it should be "Partial"? (common error!)
+8. **DOUBLE-CHECK**: Are you sure this isn't "Partial" when it should be "Almost"? (common error!)
+9. **CRITICAL**: If the grading guidelines say 0 points, the answer is **Incorrect** regardless of length or observations made.
+
+**YOUR TASK**: Based on the grading guidelines and student answer above, classify this solution into EXACTLY ONE category: Correct, Almost, Partial, or Incorrect.
+
+Remember: The points value in the grading guidelines is your PRIMARY guide. Match your classification to the points.
+
+Output ONLY the JSON object with your classification:"""
+
+        response, msg_history, info = get_response_from_llm(
+            msg=instruction,
+            model=self.model,
+            msg_history=[],
+        )
+
+        # Extract prediction using flexible extraction
+        prediction = "None"
+        response_text = ""
+        try:
+            response_text = msg_history[-1]["text"] if msg_history else ""
+            extracted = _extract_response_flexible(response_text)
+            if extracted:
+                prediction = extracted
+                self.log_fn(f"Extracted prediction: {prediction}")
+            else:
+                # Try one more time with normalization on the raw text
+                normalized = _normalize_prediction(response_text)
+                if normalized:
+                    prediction = normalized
+                    self.log_fn(f"Normalized prediction: {prediction}")
+                else:
+                    self.log_fn(f"Could not extract prediction from response: {response_text[:200]}...")
+        except Exception as e:
+            self.log_fn(f"Error extracting prediction: {e}")
+
+        # Validate prediction against allowed categories
+        allowed_categories = ["Correct", "Incorrect", "Partial", "Almost"]
+        if prediction not in allowed_categories:
+            self.log_fn(f"Invalid prediction '{prediction}', defaulting to None")
+            prediction = "None"
+        
+        # Post-processing: Use points information if available to correct misclassifications
+        # This is a critical section - points provide ground truth signal
+        # POINTS ARE THE PRIMARY SIGNAL - they directly map to the correct classification
+        # Store the points-based prediction as the authoritative classification
+        points_based_prediction = None
+        points_val = None
+        if points is not None:
+            points_val = int(points) if isinstance(points, str) else points
+            
+            # DIRECT POINTS-TO-LABEL MAPPING - Points are the ground truth
+            # This is the most reliable signal we have
+            if points_val == 7:
+                points_based_prediction = "Correct"
+            elif points_val == 6:
+                points_based_prediction = "Almost"
+            elif 1 <= points_val <= 3:
+                points_based_prediction = "Partial"
+            elif points_val == 0:
+                points_based_prediction = "Incorrect"
+        
+        # If we have a points-based prediction, use it as the primary guide
+        # but allow response-based adjustments only for edge cases
+        if points_based_prediction and points_val is not None:
+            # Check if the LLM response strongly contradicts the points-based prediction
+            # Only override points if there's very strong evidence in the response
+            response_lower = response_text.lower() if response_text else ""
+            
+            # Strong contradiction check: If points say Incorrect (0) but response
+            # explicitly mentions strong Partial indicators AND points > 0
+            if points_based_prediction == "Incorrect" and points_val == 0:
+                # Points=0 is very strong signal - only override if response
+                # explicitly says Partial with strong evidence AND mentions points > 0
+                has_strong_partial = any(re.search(p, response_lower) for p in [
+                    r'\bpartial\s+(?:solution|proof|credit)\b',
+                    r'\bsome\s+(?:credit|points|progress)\b',
+                    r'\bon\s+the\s+right\s+track\b',
+                ])
+                # Don't override points=0 easily - it's the strongest signal
+                if not has_strong_partial:
+                    prediction = "Incorrect"
+                    self.log_fn(f"Points-based classification: Points=0 -> 'Incorrect'")
+                else:
+                    # Even with partial indicators, points=0 means no credit
+                    prediction = "Incorrect"
+                    self.log_fn(f"Points=0 overrides Partial indicators -> 'Incorrect'")
+            elif points_based_prediction == "Partial" and 1 <= points_val <= 3:
+                # Check if response strongly suggests Correct (but points say 1-3)
+                has_major_flaw = any(re.search(p, response_lower) for p in [
+                    r'\bmajor\s+(?:error|flaw|gap|mistake)\b',
+                    r'\bsignificant\s+(?:gap|missing|incomplete)\b',
+                    r'\bincomplete\s+(?:proof|solution)\b',
+                    r'\bdid\s+not\s+(?:complete|finish|prove)\b',
+                ])
+                if has_major_flaw:
+                    prediction = "Partial"
+                    self.log_fn(f"Points-based classification: Points={points_val} + major flaws -> 'Partial'")
+                else:
+                    # Default to points-based classification
+                    prediction = "Partial"
+                    self.log_fn(f"Points-based classification: Points={points_val} -> 'Partial'")
+            elif points_based_prediction == "Correct" and points_val == 7:
+                # Points=7 should be Correct, but check if response mentions any flaw
+                has_any_flaw = any(re.search(p, response_lower) for p in [
+                    r'\bminor\s+(?:error|mistake|typo)\b',
+                    r'\bsign\s+error\b',
+                    r'\barithmetic\s+error\b',
+                    r'\balmost\s+(?:correct|perfect)\b',
+                ])
+                if has_any_flaw:
+                    prediction = "Almost"
+                    self.log_fn(f"Points=7 but found flaws -> 'Almost'")
+                else:
+                    prediction = "Correct"
+                    self.log_fn(f"Points-based classification: Points=7 -> 'Correct'")
+            else:
+                # Default: use points-based prediction
+                prediction = points_based_prediction
+                self.log_fn(f"Points-based classification: Points={points_val} -> '{prediction}'")
+        
+        # Post-processing: Check if "Partial" should be "Incorrect"
+        # Only do this if points don't explicitly say otherwise
+        if prediction == "Partial" and response_text:
+            response_lower = response_text.lower()
+            # Check if points explicitly say this should be Partial (1-3 points)
+            points_say_partial = points is not None and 1 <= (int(points) if isinstance(points, str) else points) <= 3
+            
+            if not points_say_partial:
+                # Strong indicators that this should be Incorrect, not Partial
+                strong_incorrect_indicators = [
+                    r'wrong\s+(?:method|approach|idea|strategy)',
+                    r'incorrect\s+(?:method|approach|idea|strategy)',
+                    r'fundamentally\s+wrong',
+                    r'fundamentally\s+incorrect',
+                    r'no\s+understanding',
+                    r'failed\s+to\s+understand',
+                    r'does\s+not\s+understand',
+                    r'no\s+valid\s+proof',
+                    r'no\s+valid\s+reasoning',
+                    r'circular\s+reasoning',
+                    r'begging\s+the\s+question',
+                    r'assumed\s+what\s+needed\s+to\s+be\s+proved',
+                    r'verification\s+by\s+example',
+                    r'checked\s+(?:some|a\s+few|several)\s+examples',
+                    r'not\s+a\s+valid\s+proof',
+                    r'not\s+a\s+proof',
+                    r'invalid\s+proof',
+                    r'invalid\s+reasoning',
+                    r'flawed\s+reasoning',
+                    r'logical\s+error',
+                    r'logical\s+flaw',
+                    r'completely\s+wrong',
+                    r'entirely\s+wrong',
+                    r'totally\s+wrong',
+                    r'absolutely\s+wrong',
+                    r'completely\s+incorrect',
+                    r'entirely\s+incorrect',
+                    r'totally\s+incorrect',
+                    r'absolutely\s+incorrect',
+                    r'no\s+credit',
+                    r'received\s+0\s+points',
+                    r'0\s+points',
+                    r'zero\s+points',
+                    r'no\s+valid\s+work',
+                    r'no\s+meaningful\s+progress',
+                    r'did\s+not\s+make\s+progress',
+                    r'no\s+progress',
+                ]
+                for pattern in strong_incorrect_indicators:
+                    if re.search(pattern, response_lower, re.IGNORECASE):
+                        self.log_fn(f"Post-processing: Found strong 'Incorrect' indicator (was Partial), changing to 'Incorrect'")
+                        prediction = "Incorrect"
+                        break
+            
+            # Additional check: If points=0, force Incorrect (no credit given)
+            # This should already be handled by points-based classification, but double-check
+            if points is not None:
+                points_val = int(points) if isinstance(points, str) else points
+                if points_val == 0 and prediction != "Incorrect":
+                    self.log_fn(f"Post-processing: Points=0 with Partial prediction -> Incorrect (no credit given)")
+                    prediction = "Incorrect"
+        
+        # Post-processing: Check if "Incorrect" should be "Partial"
+        # BUT: If points=0, the student got NO credit, so they should remain Incorrect
+        if prediction == "Incorrect" and response_text and points is not None:
+            points_val = int(points) if isinstance(points, str) else points
+            # Only upgrade from Incorrect to Partial if points > 0 (student got some credit)
+            if points_val > 0:
+                response_lower = response_text.lower()
+                strong_partial_indicators = [
+                    r'(?:good|correct|right)\s+(?:start|approach|direction|idea|method)',
+                    r'on\s+the\s+right\s+track',
+                    r'right\s+idea',
+                    r'correct\s+method',
+                    r'correct\s+approach',
+                    r'good\s+understanding',
+                    r'understands\s+the\s+problem',
+                    r'understands\s+the\s+concept',
+                    r'(?:significant|substantial|good|decent)\s+progress',
+                    r'partial\s+(?:solution|proof|answer|result)',
+                    r'incomplete\s+but\s+(?:correct|valid|good|promising)',
+                    r'incomplete\s+proof',
+                    r'partially\s+correct',
+                    r'started\s+(?:correctly|well)',
+                    r'began\s+(?:correctly|well)',
+                    r'set\s+up\s+(?:correctly|properly)',
+                    r'identified\s+(?:the\s+)?(?:key|correct|right)',
+                    r'found\s+(?:the\s+)?(?:correct|right|key)',
+                    r'correctly\s+identified',
+                    r'correctly\s+determined',
+                    r'correctly\s+proved',
+                    r'correctly\s+showed',
+                    r'correctly\s+derived',
+                    r'correctly\s+stated',
+                    r'correct\s+up\s+to',
+                    r'correct\s+until',
+                    r'valid\s+up\s+to',
+                    r'valid\s+until',
+                    r'made\s+progress',
+                    r'shows\s+progress',
+                    r'headed\s+in\s+the\s+right\s+direction',
+                    r'going\s+in\s+the\s+right\s+direction',
+                    r'did\s+not\s+complete',
+                    r'did\s+not\s+finish',
+                    r'incomplete\s+attempt',
+                    r'unfinished\s+but',
+                    r'missing\s+(?:some|several|many)\s+(?:steps|parts)',
+                    r'needs\s+(?:more|additional)\s+(?:work|steps|proof)',
+                    r'proved\s+that',
+                    r'showed\s+that',
+                    r'demonstrated\s+that',
+                    r'established\s+that',
+                ]
+                for pattern in strong_partial_indicators:
+                    if re.search(pattern, response_lower, re.IGNORECASE):
+                        self.log_fn(f"Post-processing: Found strong 'Partial' indicator with points>0, changing from 'Incorrect' to 'Partial'")
+                        prediction = "Partial"
+                        break
+        
+        # Post-processing: Check if "Partial" should be "Almost"
+        # Only upgrade if points don't explicitly say Partial (1-3 points)
+        if prediction == "Partial" and response_text:
+            # Check if points explicitly say this should be Partial
+            points_say_partial = points is not None and 1 <= (int(points) if isinstance(points, str) else points) <= 3
+            points_say_almost = points is not None and (int(points) if isinstance(points, str) else points) == 6
+            
+            response_lower = response_text.lower()
+            
+            # If points say Almost (6), strongly consider upgrading
+            if points_say_almost:
+                # Check for any Almost indicators
+                almost_indicators = [
+                    r'\balmost\b', r'\bnearly\b', r'\bclose\s+to\b',
+                    r'\bminor\b', r'\bsmall\b', r'\btiny\b',
+                    r'\bcomplete\s+except\b', r'\bcorrect\s+except\b',
+                    r'\bwould\s+be\s+(?:correct|perfect|complete)\b',
+                    r'\bessentially\s+(?:correct|complete)\b',
+                ]
+                for pattern in almost_indicators:
+                    if re.search(pattern, response_lower, re.IGNORECASE):
+                        self.log_fn(f"Post-processing: Points=6 + Almost indicator -> upgrading to 'Almost'")
+                        prediction = "Almost"
+                        break
+            
+            # Only upgrade if points don't explicitly say Partial
+            if prediction == "Partial" and not points_say_partial:
+                # Very strict patterns - must explicitly mention single tiny issue
+                strict_almost_indicators = [
+                    r'only\s+(?:a\s+)?(?:one|single|1)\s+(?:minor|small|tiny)\s+(?:error|mistake|typo|issue|flaw)',
+                    r'just\s+(?:a\s+)?(?:one|single|1)\s+(?:minor|small|tiny)\s+(?:error|mistake|typo|issue|flaw)',
+                    r'(?:one|single|1)\s+(?:minor|small|tiny)\s+(?:error|mistake|typo|issue|flaw)\s+(?:only|just)',
+                    r'(?:just|only)\s+(?:a\s+)?typo',
+                    r'(?:just|only)\s+(?:a\s+)?sign\s+error',
+                    r'(?:small|minor|tiny)\s+(?:arithmetic|calculation)\s+(?:error|mistake)\s+(?:only|just)',
+                    r'(?:arithmetic|calculation|sign)\s+(?:error|mistake)\s+(?:only|just)',
+                    r'(?:just|only)\s+(?:a\s+)?(?:minor|small|tiny)\s+(?:arithmetic|calculation|computation)\s+(?:error|mistake)',
+                    r'(?:just|only)\s+(?:a\s+)?(?:minor|small|tiny)\s+(?:flaw|gap|omission)',
+                    r'(?:one|single|1)\s+(?:minor|small|tiny)\s+(?:flaw|gap|omission)',
+                    r'(?:almost|nearly)\s+(?:perfect|complete|correct|right|valid)',
+                    r'(?:essentially|practically|basically)\s+(?:correct|complete|right|valid)',
+                    r'correct\s+except\s+for\s+(?:a\s+)?(?:minor|small|tiny)',
+                    r'valid\s+except\s+for\s+(?:a\s+)?(?:minor|small|tiny)',
+                    r'complete\s+except\s+for\s+(?:a\s+)?(?:minor|small|tiny)',
+                    r'would\s+be\s+(?:correct|perfect|complete|valid)\s+(?:if|with|except)',
+                    r'could\s+be\s+(?:correct|perfect|complete|valid)\s+(?:if|with|except)',
+                    r'(?:minor|small|tiny)\s+(?:inaccuracy|inconsistency)',
+                    r'(?:just|only)\s+(?:a\s+)?(?:bit|slightly)\s+(?:off|wrong)',
+                    r'(?:simple|trivial)\s+(?:error|mistake|typo|fix)',
+                    r'(?:easily|quickly)\s+(?:fixed|corrected|fixable|correctable)',
+                    r'(?:one|a)\s+(?:small|minor|tiny)\s+(?:step|thing|detail)\s+(?:missing|wrong)',
+                    r'forgot\s+(?:to\s+)?(?:check|verify|include)\s+(?:just|only)\s+(?:a|one)',
+                    r'forgot\s+(?:to\s+)?(?:check|verify|include)\s+(?:a|one)\s+(?:minor|small|tiny)',
+                    r'missed\s+(?:just|only)\s+(?:a|one)\s+(?:minor|small|tiny)',
+                    r'missed\s+(?:a|one)\s+(?:minor|small|tiny)',
+                    r'(?:minor|small|tiny)\s+(?:error|mistake|issue|typo|flaw)\s+(?:at|in)\s+(?:the|one)\s+(?:end|step)',
+                    r'(?:otherwise|apart\s+from|except\s+for)\s+(?:a|one|this|that)\s+(?:minor|small|tiny)',
+                    r'(?:valid|correct|good|sound|right)\s+(?:proof|solution|argument|answer)\s+(?:except|apart\s+from|save|but)',
+                    r'(?:proof|solution|argument|answer)\s+(?:is|was)\s+(?:valid|correct|good|sound|right)\s+(?:except|apart\s+from)',
+                    r'(?:calculation|computation)\s+(?:is|was)\s+(?:slightly|a\s+bit)\s+(?:off|wrong|incorrect)',
+                    r'(?:just|only)\s+(?:a|one)\s+(?:minor|small|tiny)\s+(?:detail|thing)\s+(?:missing|wrong)',
+                    r'(?:solution|proof|answer)\s+(?:is|was)\s+(?:almost|nearly)\s+(?:complete|perfect|correct|right|valid)',
+                    r'(?:one|a)\s+(?:minor|small|tiny)\s+(?:issue|problem|concern)\s+(?:with|in)',
+                    r'(?:just|only)\s+(?:one|a)\s+(?:minor|small|tiny)\s+(?:issue|problem|concern)',
+                    r'(?:almost|nearly)\s+there',
+                    r'very\s+close\s+to\s+(?:correct|complete|perfect|right|valid)',
+                    r'(?:just|only)\s+(?:a|one)\s+(?:small|minor|tiny)\s+(?:fix|correction)',
+                    r'(?:small|minor|tiny)\s+(?:fix|correction)\s+(?:needed|required)',
+                    r'(?:would|could)\s+be\s+(?:correct|perfect|complete|valid)\s+with\s+(?:a|one)\s+(?:small|minor|tiny)',
+                    r'(?:correct|perfect|complete|valid)\s+except\s+for\s+(?:a|one)\s+(?:small|minor|tiny)',
+                    r'(?:one|a)\s+(?:character|letter|digit|sign)\s+(?:error|mistake)',
+                    r'single\s+(?:character|letter|digit|sign)\s+(?:error|mistake)',
+                    r'(?:minor|small|tiny)\s+(?:flaw|issue|problem|concern|error|mistake)',
+                    r'(?:just|only)\s+a\s+(?:typo|sign\s+error)',
+                    r'one\s+missing\s+(?:case|step|condition)',
+                    r'forgot\s+to\s+(?:check|verify|prove|include)',
+                    r'missed\s+(?:one|a)\s+(?:case|step|condition)',
+                    r'(?:minor|small|tiny)\s+incomplete',
+                    r'(?:minor|small|tiny)\s+omission',
+                    r'(?:minor|small|tiny)\s+oversight',
+                    r'(?:simple|trivial)\s+(?:error|mistake|issue|fix)',
+                    r'(?:easily|quickly)\s+(?:fixable|correctable)',
+                    r'(?:just|only)\s+one\s+(?:thing|issue|problem)',
+                    r'(?:just|only)\s+one\s+(?:small|minor|tiny)',
+                    r'(?:only|just)\s+(?:a\s+)?(?:one|single|1)\s+(?:error|mistake|issue|flaw)',
+                    r'(?:one|single|1)\s+(?:error|mistake|issue|flaw)\s+(?:only|just)',
+                    r'(?:essentially|basically)\s+(?:correct|right|valid)',
+                    r'(?:solution|proof|answer)\s+(?:is|was)\s+(?:essentially|mostly)\s+(?:correct|right|valid)',
+                    r'(?:all|everything)\s+(?:correct|right|valid)\s+(?:except|but)\s+(?:one|a)\s+(?:tiny|small|minor)',
+                    r'(?:correct|right|valid)\s+(?:except|but)\s+(?:for\s+)?(?:one|a)\s+(?:tiny|small|minor)',
+                    r'(?:would|could)\s+be\s+(?:a\s+)?(?:perfect|complete)\s+(?:solution|proof|answer)\s+(?:if|with|except)',
+                    r'(?:almost|nearly)\s+(?:got|had)\s+(?:it|the\s+solution|the\s+proof|the\s+answer)',
+                    r'(?:just|only)\s+(?:one|a)\s+(?:small|minor|tiny)\s+(?:step|part|piece)\s+(?:missing|wrong)',
+                    r'(?:one|a)\s+(?:tiny|small|minor)\s+(?:error|mistake|issue)\s+(?:in|at)\s+(?:the\s+)?(?:end|last\s+step)',
+                    r'(?:minor|small|tiny)\s+(?:mistake|error)\s+which\s+(?:is|are)\s+not\s+negligible',
+                    r'(?:almost|nearly)\s+(?:complete|perfect|correct)',
+                    r'(?:essentially|practically)\s+(?:complete|perfect|correct)',
+                ]
+                for pattern in strict_almost_indicators:
+                    if re.search(pattern, response_lower, re.IGNORECASE):
+                        self.log_fn(f"Post-processing: Found strict 'Almost' indicator (was Partial), changing to 'Almost'")
+                        prediction = "Almost"
+                        break
+        
+        # Post-processing: Check if "Almost" should be "Partial"
+        # Downgrade if points explicitly say Partial (1-3 points) or response mentions major gaps
+        if prediction == "Almost" and response_text:
+            # Check if points explicitly say this should be Partial
+            points_say_partial = points is not None and 1 <= (int(points) if isinstance(points, str) else points) <= 3
+            points_say_almost = points is not None and (int(points) if isinstance(points, str) else points) == 6
+            
+            response_lower = response_text.lower()
+            
+            # If points say Partial (1-3), strongly consider downgrading
+            if points_say_partial:
+                # Check for Partial indicators
+                partial_indicators = [
+                    r'\bincomplete\b', r'\bpartial\b', r'\bgap\b',
+                    r'\bdid\s+not\s+(?:complete|finish|prove)\b',
+                    r'\bmissing\b', r'\bunfinished\b',
+                ]
+                for pattern in partial_indicators:
+                    if re.search(pattern, response_lower, re.IGNORECASE):
+                        self.log_fn(f"Post-processing: Points=1-3 + Partial indicator -> downgrading to 'Partial'")
+                        prediction = "Partial"
+                        break
+                
+                # If still Almost but points say Partial, downgrade anyway
+                if prediction == "Almost":
+                    self.log_fn(f"Points say Partial (1-3), downgrading from Almost to Partial")
+                    prediction = "Partial"
+            
+            # If points say Almost (6), be more conservative about downgrading
+            # Only downgrade if there are strong Partial indicators
+            if prediction == "Almost" and points_say_almost:
+                strong_partial_indicators = [
+                    r'\bincomplete\s+(?:proof|solution|answer)\b',
+                    r'\b(?:major|significant|substantial)\s+(?:gap|missing)\b',
+                    r'\b(?:multiple|several|many)\s+(?:errors|mistakes|issues|gaps)\b',
+                    r'\bdid\s+not\s+(?:complete|finish|prove|show)\b',
+                    r'\b(?:failed|unable)\s+to\s+(?:complete|finish|prove)\b',
+                    r'\b(?:needs|requires)\s+(?:more|additional|further)\s+(?:work|steps|proof)\b',
+                    r'\b(?:missing|lacks?)\s+(?:the|a|critical|key)\s+(?:proof|step|argument)\b',
+                    r'\b(?:far\s+from|not)\s+(?:complete|perfect|finished)\b',
+                ]
+                for pattern in strong_partial_indicators:
+                    if re.search(pattern, response_lower, re.IGNORECASE):
+                        self.log_fn(f"Post-processing: Strong Partial indicators despite points=6 -> downgrading to 'Partial'")
+                        prediction = "Partial"
+                        break
+            
+            # If no points info, use patterns to decide
+            if prediction == "Almost" and points is None:
+                # Patterns indicating this should be Partial, not Almost
+                partial_indicators_in_almost = [
+                    r'incomplete\s+(?:proof|solution|answer)',
+                    r'missing\s+(?:multiple|several|many|critical|key|important)',
+                    r'did\s+not\s+(?:complete|finish|prove|show|demonstrate)',
+                    r'(?:major|significant|substantial|big|large)\s+(?:gap|missing|incomplete|error|mistake)',
+                    r'(?:multiple|several|many|various)\s+(?:errors|mistakes|issues|gaps|problems)',
+                    r'only\s+(?:partial|partly)\s+(?:correct|complete|done)',
+                    r'(?:partially|partly)\s+(?:correct|complete|done|solved)',
+                    r'(?:proof|solution|answer)\s+(?:is|was)\s+incomplete',
+                    r'(?:did|could)\s+not\s+(?:solve|finish|complete|prove|show)',
+                    r'(?:failed|unable)\s+to\s+(?:complete|finish|prove|show|demonstrate)',
+                    r'(?:started|began)\s+(?:correctly|well|properly)\s+but',
+                    r'(?:good|correct|right)\s+(?:start|approach|idea|attempt)\s+but\s+(?:incomplete|unfinished)',
+                    r'on\s+the\s+right\s+track\s+but',
+                    r'(?:needs|requires)\s+(?:more|additional|further|much)\s+(?:work|steps|proof|effort)',
+                    r'(?:substantial|significant|major|considerable)\s+progress\s+(?:needed|required|remaining)',
+                    r'(?:missing|lacks)\s+(?:the|a|critical|key|important)\s+(?:proof|step|argument|justification|part|component)',
+                    r'(?:not|never)\s+(?:completed|finished|proved|showed|demonstrated)',
+                    r'(?:unfinished|incomplete)\s+(?:attempt|solution|proof|work|answer)',
+                    r'(?:does|did)\s+not\s+(?:show|prove|demonstrate|establish)',
+                    r'(?:lacks?|missing)\s+(?:the|a|any)\s+(?:complete|full|proper)',
+                    r'(?:far\s+from|not)\s+(?:complete|perfect|correct|finished)',
+                    r'(?:more|still)\s+(?:work|steps|proof)\s+(?:needed|required)',
+                    r'(?:incomplete|partial)\s+understanding',
+                    r'(?:some|partial)\s+progress\s+but',
+                    r'(?:attempt|try)\s+was\s+(?:incomplete|unfinished)',
+                ]
+                for pattern in partial_indicators_in_almost:
+                    if re.search(pattern, response_lower, re.IGNORECASE):
+                        self.log_fn(f"Post-processing: Found 'Partial' indicator (was Almost), changing to 'Partial'")
+                        prediction = "Partial"
+                        break
+        
+        # Final check: If we still have "None" or invalid prediction, try to use points
+        if prediction in ["None"] and points is not None:
+            points = int(points) if isinstance(points, str) else points
+            if points == 7:
+                prediction = "Correct"
+                self.log_fn(f"Post-processing: Defaulting to 'Correct' based on points=7")
+            elif points == 6:
+                prediction = "Almost"
+                self.log_fn(f"Post-processing: Defaulting to 'Almost' based on points=6")
+            elif 1 <= points <= 3:
+                prediction = "Partial"
+                self.log_fn(f"Post-processing: Defaulting to 'Partial' based on points={points}")
+            elif points == 0:
+                prediction = "Incorrect"
+                self.log_fn(f"Post-processing: Defaulting to 'Incorrect' based on points=0")
+        
+        # Last resort: try to extract from response text one more time with broader patterns
+        if prediction == "None" and response_text:
+            response_lower = response_text.lower()
+            # Look for any mention of the categories
+            if "incorrect" in response_lower and ("classification" in response_lower or "grade" in response_lower or "category" in response_lower):
+                prediction = "Incorrect"
+                self.log_fn(f"Last resort: Found 'Incorrect' in context")
+            elif "partial" in response_lower and ("classification" in response_lower or "grade" in response_lower or "category" in response_lower):
+                prediction = "Partial"
+                self.log_fn(f"Last resort: Found 'Partial' in context")
+            elif "almost" in response_lower and ("classification" in response_lower or "grade" in response_lower or "category" in response_lower):
+                prediction = "Almost"
+                self.log_fn(f"Last resort: Found 'Almost' in context")
+            elif "correct" in response_lower and ("classification" in response_lower or "grade" in response_lower or "category" in response_lower):
+                prediction = "Correct"
+                self.log_fn(f"Last resort: Found 'Correct' in context")
+        
+        # If still None, use points as final fallback
+        if prediction == "None" and points is not None:
+            points = int(points) if isinstance(points, str) else points
+            if points == 7:
+                prediction = "Correct"
+            elif points == 6:
+                prediction = "Almost"
+            elif 1 <= points <= 3:
+                prediction = "Partial"
+            else:
+                prediction = "Incorrect"
+            self.log_fn(f"Final fallback: Using points={points} -> {prediction}")
+        
+        # Absolute last resort
+        if prediction == "None":
+            prediction = "Incorrect"
+            self.log_fn(f"Absolute fallback: Defaulting to 'Incorrect'")
+
+        return str(prediction), msg_history

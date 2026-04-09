@@ -1,0 +1,255 @@
+"""
+Task agent: solves a given task with chain-of-thought reasoning.
+
+Reimplemented from facebookresearch/HyperAgents task_agent.py.
+Same interface, same JSON output format, same extraction logic.
+
+This is the INITIAL task agent. The meta agent modifies this file
+during self-improvement. The evaluation harness loads whatever
+task_agent.py exists at the agent's repo path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from agent.llm_client import get_response_from_llm, EVAL_MODEL
+
+# Compile regex patterns once for efficiency
+_GRADE_PATTERN = re.compile(r'(?:grade|score|result|answer|verdict)[\s:]+([^\n]+)', re.IGNORECASE)
+_JSON_BLOCK_PATTERN = re.compile(r'```(?:json)?\s*\n?(.*?)\n?```', re.DOTALL)
+_NUMERIC_SCORE_PATTERN = re.compile(r'\b(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\b')
+_SINGLE_NUMBER_PATTERN = re.compile(r'\b(score|grade)[\s:=]+(\d+(?:\.\d+)?)\b', re.IGNORECASE)
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_jsons(text: str) -> list[dict] | None:
+    """Extract JSON objects from <json>...</json> blocks.
+
+    Uses index/rindex to find outermost tag pairs, avoiding the lazy .*?
+    regex bug that truncates content with nested braces.
+    Also attempts to extract JSON from markdown code blocks as fallback.
+    Includes enhanced error recovery for malformed JSON.
+    """
+    results = []
+    search_from = 0
+    parse_errors = []
+    
+    while True:
+        start = text.find("<json>", search_from)
+        if start == -1:
+            break
+        end = text.find("</json>", start)
+        if end == -1:
+            break
+        inner = text[start + 6:end].strip()
+        search_from = end + 7
+        
+        # Skip empty blocks
+        if not inner:
+            continue
+            
+        # Try direct parsing first
+        try:
+            results.append(json.loads(inner))
+            continue
+        except json.JSONDecodeError as e:
+            parse_errors.append(f"Block at {start}: {str(e)[:50]}")
+        
+        # Try to extract JSON from within the text if it's wrapped in other content
+        try:
+            # Look for JSON-like content with braces
+            brace_start = inner.find("{")
+            brace_end = inner.rfind("}")
+            if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+                results.append(json.loads(inner[brace_start:brace_end + 1]))
+                continue
+        except json.JSONDecodeError:
+            pass
+        
+        # Try one more fallback: look for JSON with trailing commas or comments
+        try:
+            # Remove common JSON-breaking patterns
+            cleaned = inner.replace(",\n}", "\n}").replace(",\n]", "\n]")
+            # Remove single-line comments
+            cleaned = re.sub(r'//.*?\n', '\n', cleaned)
+            # Remove multi-line comments
+            cleaned = re.sub(r'/\*.*?\*/', '', cleaned, flags=re.DOTALL)
+            results.append(json.loads(cleaned))
+            continue
+        except json.JSONDecodeError:
+            pass
+        
+        # Try fixing common quote issues
+        try:
+            # Replace smart quotes with regular quotes
+            cleaned = inner.replace('"', '"').replace('"', '"').replace("'", "'")
+            results.append(json.loads(cleaned))
+            continue
+        except json.JSONDecodeError:
+            pass
+    
+    # Fallback: try to find JSON in markdown code blocks
+    if not results:
+        json_blocks = _JSON_BLOCK_PATTERN.findall(text)
+        for block in json_blocks:
+            try:
+                results.append(json.loads(block.strip()))
+            except json.JSONDecodeError:
+                # Try the same cleanup for markdown blocks
+                try:
+                    cleaned = block.strip().replace(",\n}", "\n}").replace(",\n]", "\n]")
+                    cleaned = re.sub(r'//.*?\n', '\n', cleaned)
+                    cleaned = re.sub(r'/\*.*?\*/', '', cleaned, flags=re.DOTALL)
+                    results.append(json.loads(cleaned))
+                except json.JSONDecodeError:
+                    continue
+    
+    # Log parsing errors for debugging if no results found
+    if not results and parse_errors:
+        logger.debug(f"JSON parsing errors: {parse_errors}")
+    
+    return results or None
+
+
+class TaskAgent:
+    """Task agent that solves IMO grading problems with chain-of-thought reasoning."""
+
+    def __init__(self, model: str = EVAL_MODEL, log_file: str = "") -> None:
+        self.model = model
+        self.log_fn = logger.info
+
+    def forward(self, inputs: dict) -> tuple[str, list[dict]]:
+        """Run the task agent on a single problem with chain-of-thought reasoning.
+
+        Args:
+            inputs: dict with domain, problem, solution, grading_guidelines, student_answer
+
+        Returns:
+            (prediction, msg_history)
+        """
+        # Extract fields for better prompting
+        domain = inputs.get("domain", "Mathematics")
+        problem = inputs.get("problem", "")
+        solution = inputs.get("solution", "")
+        grading_guidelines = inputs.get("grading_guidelines", "")
+        student_answer = inputs.get("student_answer", "")
+
+        instruction = f"""You are an expert {domain} grader evaluating student solutions.
+
+Your task is to grade a student's answer to a problem by comparing it against the official solution and following the grading guidelines.
+
+## Problem Statement:
+{problem}
+
+## Official Solution:
+{solution}
+
+## Grading Guidelines:
+{grading_guidelines}
+
+## Student's Answer:
+{student_answer}
+
+## Instructions:
+1. First, analyze the student's answer step by step. Identify what they did correctly and incorrectly.
+2. Compare their approach to the official solution.
+3. Consider the grading guidelines carefully.
+4. Provide your reasoning before giving the final grade.
+5. Respond ONLY in JSON format wrapped in <json>...</json> tags with the following exact schema:
+
+<json>
+{{
+    "reasoning": "Your detailed analysis and reasoning about the student's answer...",
+    "response": "The final grade/assessment (e.g., 'Correct', 'Partially Correct', 'Incorrect', or a numeric score)"
+}}
+</json>
+
+## Example Response:
+<json>
+{{
+    "reasoning": "The student correctly identified the key theorem but made an error in the algebraic manipulation at step 3. The final answer is incorrect due to this calculation error.",
+    "response": "Partially Correct"
+}}
+</json>
+
+## Important Notes:
+- Your response MUST be valid JSON inside <json> tags
+- The "response" field should contain a concise grade/assessment
+- Use standard grading terms like: "Correct", "Partially Correct", "Incorrect", or numeric scores
+- Be objective and fair in your assessment
+- Focus on whether the student's answer matches the official solution
+
+Think carefully and provide a fair assessment based on the official solution and grading guidelines."""
+
+        response, msg_history, info = get_response_from_llm(
+            msg=instruction,
+            model=self.model,
+            msg_history=[],
+        )
+
+        # Extract prediction from JSON
+        prediction = "None"
+        reasoning = ""
+        confidence = "unknown"
+        try:
+            extracted = _extract_jsons(msg_history[-1]["text"])
+            if extracted:
+                last_json = extracted[-1]
+                # Try multiple possible keys for the response (ordered by priority)
+                response_keys = ["response", "grade", "answer", "result", "assessment", 
+                               "evaluation", "score", "verdict", "conclusion", "decision"]
+                for key in response_keys:
+                    if key in last_json and last_json[key] is not None:
+                        prediction = last_json[key]
+                        break
+                
+                # Log reasoning if available
+                reasoning_keys = ["reasoning", "analysis", "explanation", "thought", 
+                                "thinking", "rationale", "justification"]
+                for key in reasoning_keys:
+                    if key in last_json and last_json[key]:
+                        reasoning = last_json[key]
+                        self.log_fn(f"{key.capitalize()}: {str(reasoning)[:200]}...")
+                        break
+                
+                # Extract confidence if available
+                if "confidence" in last_json:
+                    confidence = str(last_json["confidence"])
+                    self.log_fn(f"Confidence: {confidence}")
+            else:
+                # Fallback: try to extract any meaningful text from the response
+                response_text = msg_history[-1]["text"]
+                
+                # Try multiple extraction strategies
+                # 1. Look for common patterns like "Grade: X" or "Answer: X"
+                grade_match = _GRADE_PATTERN.search(response_text)
+                if grade_match:
+                    prediction = grade_match.group(1).strip()
+                    self.log_fn(f"Extracted grade via pattern matching: {prediction}")
+                # 2. Look for numeric scores like "5/10" or "score: 7"
+                elif _NUMERIC_SCORE_PATTERN.search(response_text):
+                    match = _NUMERIC_SCORE_PATTERN.search(response_text)
+                    prediction = f"{match.group(1)}/{match.group(2)}"
+                    self.log_fn(f"Extracted numeric score: {prediction}")
+                elif _SINGLE_NUMBER_PATTERN.search(response_text):
+                    match = _SINGLE_NUMBER_PATTERN.search(response_text)
+                    prediction = match.group(2)
+                    self.log_fn(f"Extracted single number score: {prediction}")
+                else:
+                    # Last resort: use first 100 chars of response
+                    prediction = response_text[:100].strip()
+                    self.log_fn(f"Using raw response (no JSON found): {prediction[:50]}...")
+        except Exception as e:
+            self.log_fn(f"Error extracting prediction: {e}")
+
+        # Normalize prediction to string
+        if prediction is None:
+            prediction = "None"
+        elif not isinstance(prediction, str):
+            prediction = str(prediction)
+        
+        return prediction.strip(), msg_history

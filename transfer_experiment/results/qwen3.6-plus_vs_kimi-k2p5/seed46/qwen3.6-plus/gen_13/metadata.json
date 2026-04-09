@@ -1,0 +1,5 @@
+{
+  "valid": true,
+  "train_score": 0.67,
+  "val_score": 0.69
+}
