@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+title: "hyperspace: Cross-Model Evolution of Self-Modifying Code"
+message: "If you use this work, please cite it using the metadata below."
+type: software
+version: 0.1.1
+date-released: 2026-04-09
+doi: 10.5281/zenodo.19488272
+url: https://github.com/opinionated-systems/hyperspace
+abstract: >
+  LLM agents on different models evolve both their task code and the
+  code that decides how to improve, then discover and adopt each
+  other's strategies without being told to cooperate. The agents span
+  proprietary and open-weight models across capability tiers. Safety
+  is enforced at the infrastructure level via markspace, outside the
+  agent's editable scope. Includes a faithful replication of
+  Hyperagents DGM-H (Zhang et al., 2026) on IMO-GradingBench and
+  cross-model transfer experiments across 5 model pairings with 30
+  voluntary adoption events backed by LLM trace evidence.
+authors:
+  - family-names: Loose
+    given-names: Andre
+    affiliation: Opinionated Systems, Inc.
+    email: andre@opinionated.systems
+license: MIT
