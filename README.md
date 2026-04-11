@@ -15,6 +15,14 @@ ADAS's own future work identifies two open problems: the meta agent improving it
 
 An agent rewriting its own code can rewrite any constraint you put in that code. When we switched the output format from markdown code fences to XML tags, the agent reverted the change in one generation. [markspace](https://github.com/opinionated-systems/markspace) enforces scope (what the agent can affect, accidentally or adversarially), and by that also controls which evaluation signals the agent can see. The latter matters because a self-modifying agent will optimize for whatever metric is available to it. If the metric is aligned with the goal, this produces genuine improvement. If it isn't, the agent learns to game the measure while the task results get worse ([Goodhart's law](https://en.wikipedia.org/wiki/Goodhart%27s_law)).
 
+> [!WARNING]
+> markspace controls what the agent can edit, but not what evolved code can
+> do when it executes. An evolved `task_agent.py` runs inside the harness
+> Python process and can call arbitrary system functions. Our experiments run
+> inside a devcontainer, which limits blast radius but does not provide hard
+> isolation (the container runs with `--network=host` and a Docker socket
+> mount). Production deployment would require proper sandboxing per generation.
+
 With safety enforced at the infrastructure level, we let multiple self-modifying agents share evolved code through the environment. In prior fixed-search systems ([DGM](https://arxiv.org/abs/2505.22954), [AlphaEvolve](https://arxiv.org/abs/2506.13131), [FunSearch](https://doi.org/10.1038/s41586-023-06924-6)), the framework decides what code to transfer. In our system, the agent discovers peer code through its own exploration and decides whether to use it, without knowing the environment is mediated or constrained.
 
 [CORAL (Qu et al., 2026)](https://arxiv.org/abs/2604.01658) independently arrives at the same architecture: autonomous agents coordinating through shared persistent memory. We extend this in three directions: **cross-model transfer** (agents on different LLMs adopt each other's code), **infrastructure-enforced safety** via markspace (not just workspace isolation), and **meta-agent self-modification** (the improvement process itself evolves). CORAL adds structured knowledge types (notes, skills) and heartbeat interventions for stuck agents. [markspace](https://github.com/opinionated-systems/markspace) supports five mark types (Intent, Action, Observation, Warning, Need) but these experiments use only Observations for code. The [benchmarks](https://github.com/opinionated-systems/benchmarks) repository applies DGM-H with cross-model strategy sharing to a different domain: VLIW SIMD kernel optimization (Anthropic's performance take-home, where [CORAL](https://arxiv.org/abs/2604.01658) holds the best known result at 1,103 cycles).
